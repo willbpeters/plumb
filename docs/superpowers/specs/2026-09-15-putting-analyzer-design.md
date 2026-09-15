@@ -605,7 +605,72 @@ before any further firmware work, because every downstream accuracy number depen
 
 ---
 
-## 14. Repository structure
+## 14. Development environment
+
+### 14.1 Flashing
+
+The USB-C port is wired to a **CH343P USB-to-UART bridge** on GPIO43 (TX) / GPIO44 (RX). It is
+not connected to the ESP32-S3's native USB peripheral. The board carries BOOT (GPIO0) and
+RESET buttons and an automatic download circuit, so `esptool` enters download mode via RTS/DTR
+without manual intervention. Manual fallback: hold BOOT, press RESET, release BOOT.
+
+```
+idf.py set-target esp32s3
+idf.py build
+idf.py -p <port> -b 921600 flash monitor
+```
+
+The CH343P supports 300 bps–2 Mbps. 921600 is used; 2000000 is the ceiling.
+
+Driver: Windows and macOS require the WCH CH343SER virtual COM port driver. Recent Linux
+kernels enumerate the device as CDC-ACM with no driver installation.
+
+### 14.2 Configuration traps
+
+Three settings will produce confusing failures if set wrong, and are recorded here because
+each costs an afternoon to diagnose:
+
+1. **PSRAM mode must be QSPI, not OPI.** This board carries the ESP32-S3**R2** with 2 MB
+   quad-SPI PSRAM. Selecting octal PSRAM produces boot failures or crashes.
+2. **Arduino IDE only — "USB CDC On Boot" must be Disabled.** Serial output is routed through
+   the CH343P UART, not native USB CDC. Leaving CDC on boot enabled sends `Serial` output to
+   an unconnected native USB peripheral and the monitor stays blank.
+3. **Flash size must be set to 16 MB** or the LittleFS partition in §11 will not fit.
+
+### 14.3 No JTAG
+
+The ESP32-S3's native USB pins (GPIO19/GPIO20) are not routed to the Type-C connector, and the
+SH1.0 expansion header exposes GPIO15/16/17/18/21/33 only. USB-Serial-JTAG is therefore
+unavailable without hand-wiring, and interactive source-level debugging is out of scope.
+
+On-device debugging is limited to serial logging plus panic backtraces decoded by
+`idf.py monitor`. This constraint reinforces the development workflow in §7.6: numerical
+methods are developed and debugged in Python against the logged corpus, where a debugger
+exists, and only settled algorithms are ported to C.
+
+### 14.4 OTA is explicitly not implemented
+
+Over-the-air update is technically available — the SoC has Wi-Fi and ESP-IDF supports OTA —
+and is deliberately rejected:
+
+- The magnetic mount (§5.1) already reduces a reflash to pulling the puck off the base,
+  plugging into the exposed USB-C port, and reseating. Roughly twenty seconds. OTA would be
+  infrastructure built for a problem the mechanical design already solved.
+- OTA requires dual application partitions, roughly doubling the application's flash footprint
+  at the expense of the stroke corpus in §11.
+- Enabling the Wi-Fi stack costs approximately 50–60 KB of internal SRAM, which is contended
+  with the LVGL draw buffers in §6.3.
+- **The decisive reason:** the Wi-Fi stack changes the interrupt landscape and therefore the
+  sampling jitter that the entire accuracy argument rests on. A device validated with Wi-Fi
+  compiled out must ship with Wi-Fi compiled out, or the study does not describe the shipped
+  firmware.
+
+Wi-Fi remains disabled in all builds. There is one firmware configuration, and it is the one
+that gets validated.
+
+---
+
+## 15. Repository structure
 
 ```
 /firmware        ESP-IDF project
