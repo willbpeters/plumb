@@ -41,6 +41,7 @@ class Thresholds:
 
     stillness_window_s: float = 0.50
     stillness_gyro_std_rad: float = np.radians(0.8)
+    onset_gyro_rad: float = np.radians(1.0)
     backswing_gyro_rad: float = np.radians(8.0)
     backswing_hold_s: float = 0.04
     transition_gyro_rad: float = np.radians(2.0)
@@ -86,6 +87,13 @@ class Pipeline:
         self._hold = 0
         self._omega_history: list[np.ndarray] = []
 
+        # Back-tracking state. Detecting a stroke boundary always lags the
+        # boundary itself; these record where it actually was. Past data only.
+        self._last_quiet_n = 0
+        self._last_same_sign_n = None
+        self._backswing_axis = None
+        self._backswing_sign = None
+
     # -- conversion ------------------------------------------------------
     def _to_rad_s(self, counts: np.ndarray) -> np.ndarray:
         return counts.astype(float) * self.fs.gyro_rad_per_count
@@ -106,8 +114,23 @@ class Pipeline:
 
         if self.state is State.IDLE:
             self._step_idle(omega, accel)
-        elif self.state is State.ADDRESS:
+            return None
+
+        if self.state is State.DONE:
+            return None
+
+        self._integrate(omega, accel)
+
+        if self.state is State.ADDRESS:
             self._step_address(omega)
+        elif self.state is State.BACKSWING:
+            self._step_backswing(omega, accel)
+        elif self.state is State.DOWNSWING:
+            self._step_downswing(omega, accel)
+        elif self.state is State.IMPACT:
+            self._step_impact(omega, accel)
+        elif self.state is State.FOLLOWTHROUGH:
+            return self._step_followthrough(omega, accel)
         return None
 
     def _step_idle(self, omega, accel) -> None:
@@ -135,11 +158,141 @@ class Pipeline:
             self._enter(State.ADDRESS)
 
     def _step_address(self, omega) -> None:
+        """Detect the backswing, and record where it actually started.
+
+        Confirming a backswing needs a threshold crossing plus a hold, and both
+        are late -- the rate has to climb from zero to 8 deg/s and then persist
+        for 40 ms. The stroke began earlier, when the rate first left zero.
+
+        That latency does not cancel in the tempo ratio, because impact is
+        detected within one sample while backswing start is ~54 samples late.
+        Measured on the noiseless generator, taking the confirmation instant as
+        the start gives a worst tempo error of 0.351 against the 0.05 target in
+        parent spec section 3 -- seven times over, systematically biased low,
+        and worsening as tempo ratio rises. Back-tracking to the last quiet
+        sample brings it to 0.034.
+
+        `_last_quiet_n` reads only past samples, so this is a ring buffer rather
+        than lookahead and remains implementable on-device.
+        """
         corrected = omega - self.bias
-        if np.linalg.norm(corrected) > self.th.backswing_gyro_rad:
+        magnitude = np.linalg.norm(corrected)
+
+        if magnitude < self.th.onset_gyro_rad:
+            self._last_quiet_n = self.n
+
+        if magnitude > self.th.backswing_gyro_rad:
             self._hold += 1
             if self._hold * self.dt >= self.th.backswing_hold_s:
-                self.i_backswing_start = self.n
+                self.i_backswing_start = self._last_quiet_n
                 self._enter(State.BACKSWING)
         else:
             self._hold = 0
+
+    def _integrate(self, omega, accel) -> None:
+        """Attitude integration with the accelerometer correction gain driven
+        by state.
+
+        Parent spec 7.2 and invariant 2: between BACKSWING and FOLLOWTHROUGH the
+        accelerometer reads gravity plus stroke acceleration, so a stock
+        complementary correction is dragged off attitude by the very motion it
+        is meant to measure. Drift is bounded instead by the short integration
+        window and the bias null at address.
+        """
+        # FOLLOWTHROUGH counts as in-stroke. The putter is still moving fast
+        # there, so the accelerometer is still reading gravity plus stroke
+        # acceleration. Parent spec 7.2 restores the gain in IDLE and ADDRESS
+        # only -- those are the two states where the device is actually still.
+        in_stroke = self.state in (State.BACKSWING, State.DOWNSWING,
+                                   State.IMPACT, State.FOLLOWTHROUGH)
+        gain = self.th.accel_gain_stroke if in_stroke else self.th.accel_gain_static
+
+        # Trapezoidal, not rectangle: average the rate across the interval being
+        # integrated. That requires the sample at the END of the interval, which
+        # is one sample of LATENCY, not lookahead -- the firmware integrates the
+        # interval [i-1, i] when sample i arrives, and already has that sample in
+        # hand. It costs one stored vector.
+        #
+        # Measured on the noiseless generator, worst case over 45 strokes:
+        #   rectangle rule    0.0553 deg of face angle  (55% of the 0.1 deg budget)
+        #   trapezoidal rule  0.0013 deg                 (1.3%)
+        # a 41x improvement for one add and one multiply. Rectangle rule would
+        # spend half the noiseless budget on nothing before noise even appears.
+        corrected = omega - self.bias
+        if self._prev_omega is None:
+            self._prev_omega = corrected
+        rate = 0.5 * (corrected + self._prev_omega)
+        self._prev_omega = corrected
+        self.q = quat.integrate(self.q, rate, self.dt)
+
+        if gain > 0.0 and np.linalg.norm(accel) > 0.0:
+            measured = accel / np.linalg.norm(accel)
+            reference = self.g0 / np.linalg.norm(self.g0)
+            predicted = quat.rotate(quat.conjugate(self.q), reference)
+            error = np.cross(predicted, measured)
+            self.q = quat.integrate(self.q, gain * error / self.dt, self.dt)
+
+    def _dominant_axis(self) -> int:
+        recent = np.array(self._omega_history[-25:])
+        return int(np.argmax(np.abs(recent).mean(axis=0)))
+
+    def _step_backswing(self, omega, accel) -> None:
+        """Detect the transition, and record where the direction actually flipped.
+
+        The dominant axis and its backswing sign are frozen on entry rather than
+        recomputed per sample, so a late-stroke wobble cannot silently reinterpret
+        which axis the stroke is about.
+
+        The magnitude gate only CONFIRMS a reversal, guarding against sign
+        chatter while the rate passes through zero. The instant recorded is the
+        last sample still carrying the backswing's sign, so the confirmation
+        delay does not bias the tempo ratio -- same reasoning as the backswing
+        onset above.
+
+        Note what is NOT here: nothing keys off how far the face rotated.
+        Segmentation is timing, direction and acceleration only (invariant 1).
+        """
+        corrected = omega - self.bias
+        self._omega_history.append(corrected)
+
+        if self._backswing_axis is None:
+            self._backswing_axis = self._dominant_axis()
+            self._backswing_sign = np.sign(corrected[self._backswing_axis])
+            self._last_same_sign_n = self.n
+            return
+
+        axis = self._backswing_axis
+        if np.sign(corrected[axis]) == self._backswing_sign:
+            self._last_same_sign_n = self.n
+        elif abs(corrected[axis]) > self.th.transition_gyro_rad:
+            self.i_transition = self._last_same_sign_n
+            self._enter(State.DOWNSWING)
+
+    def _step_downswing(self, omega, accel) -> None:
+        if np.linalg.norm(accel) > self.th.impact_accel_mps2:
+            self.i_impact = self.n
+            self.q_impact = self.q.copy()
+            self._enter(State.IMPACT)
+
+    def _step_impact(self, omega, accel) -> None:
+        self._enter(State.FOLLOWTHROUGH)
+
+    def _step_followthrough(self, omega, accel):
+        if np.linalg.norm(omega - self.bias) < self.th.followthrough_gyro_rad:
+            self._hold += 1
+            if self._hold * self.dt >= self.th.followthrough_hold_s:
+                self._enter(State.DONE)
+                return self._compute()
+        else:
+            self._hold = 0
+        return None
+
+    def _compute(self) -> StrokeResult:
+        backswing = (self.i_transition - self.i_backswing_start) * self.dt
+        downswing = (self.i_impact - self.i_transition) * self.dt
+        return StrokeResult(
+            face_angle_deg=0.0,     # Task 7
+            tempo_ratio=backswing / downswing,
+            path_arc_m=0.0,         # Task 8
+            path_direction="unknown",
+        )

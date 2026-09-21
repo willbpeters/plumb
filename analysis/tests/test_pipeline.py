@@ -34,6 +34,27 @@ def test_gyro_bias_is_nulled_at_address():
 
 
 def test_backswing_is_detected():
+    """BACKSWING was the terminal state before Task 6 wired up the rest of the
+    state machine; now it is a mid-sequence transition, confirmed in full by
+    test_state_machine_visits_every_state_in_order below. This checks only the
+    prefix that was this test's original intent."""
     _, pipe, _ = run_stroke(StrokeParams())
-    assert pipe.state is State.BACKSWING
-    assert pipe.visited == [State.IDLE, State.ADDRESS, State.BACKSWING]
+    assert pipe.visited[:3] == [State.IDLE, State.ADDRESS, State.BACKSWING]
+
+
+def test_state_machine_visits_every_state_in_order():
+    _, pipe, _ = run_stroke(StrokeParams())
+    order = [State.IDLE, State.ADDRESS, State.BACKSWING, State.DOWNSWING,
+             State.IMPACT, State.FOLLOWTHROUGH, State.DONE]
+    assert pipe.visited == order
+
+
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
+def test_tempo_ratio_recovered(tempo):
+    """Compared against the ratio the generator actually produced, not the one
+    requested -- the 500 Hz grid cannot hit an arbitrary ratio exactly, and
+    holding the pipeline to a target the stroke never contained would be
+    measuring the generator's rounding, not the pipeline."""
+    traj, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
+    assert result is not None
+    assert result.tempo_ratio == pytest.approx(traj.true_tempo_ratio, abs=0.05)
