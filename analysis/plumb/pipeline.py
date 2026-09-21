@@ -50,6 +50,7 @@ class Thresholds:
     followthrough_hold_s: float = 0.30
     accel_gain_static: float = 0.02
     accel_gain_stroke: float = 0.0
+    path_straight_arc_m: float = 0.003
 
 
 @dataclass
@@ -94,6 +95,9 @@ class Pipeline:
         self._backswing_axis = None
         self._backswing_sign = None
         self._impact_window: list[tuple[int, np.ndarray]] = []
+
+        self._face_track: list[np.ndarray] = []
+        self._impact_track_index = 0
 
     # -- conversion ------------------------------------------------------
     def _to_rad_s(self, counts: np.ndarray) -> np.ndarray:
@@ -204,9 +208,27 @@ class Pipeline:
         # there, so the accelerometer is still reading gravity plus stroke
         # acceleration. Parent spec 7.2 restores the gain in IDLE and ADDRESS
         # only -- those are the two states where the device is actually still.
+        # The state label alone is not enough. Confirming a backswing takes a
+        # threshold crossing plus a 40 ms hold, so the machine still reads
+        # ADDRESS for roughly 53 samples AFTER the stroke has physically begun.
+        # Correcting against the accelerometer in that window is precisely the
+        # failure invariant 2 describes -- the accelerometer is already reading
+        # gravity plus stroke acceleration -- and the error it injects is then
+        # frozen in, because the gain is zero for the rest of the stroke.
+        #
+        # Measured: a straight stroke with zero face angle must produce zero
+        # lateral face-point displacement, for a geometric reason. It produced
+        # 25.5 mm. With this stillness gate it produces 0.
+        #
+        # So the gain is gated on the device actually being still, using the
+        # same onset threshold the back-tracking uses. During genuine stillness
+        # this changes nothing: attitude was just initialized from g0, so the
+        # correction is already a no-op. Its only effect was in the lag window,
+        # where it was harmful.
         in_stroke = self.state in (State.BACKSWING, State.DOWNSWING,
                                    State.IMPACT, State.FOLLOWTHROUGH)
-        gain = self.th.accel_gain_stroke if in_stroke else self.th.accel_gain_static
+        moving = np.linalg.norm(omega - self.bias) > self.th.onset_gyro_rad
+        gain = self.th.accel_gain_stroke if (in_stroke or moving) else self.th.accel_gain_static
 
         # Trapezoidal, not rectangle: average the rate across the interval being
         # integrated. That requires the sample at the END of the interval, which
@@ -232,6 +254,13 @@ class Pipeline:
             predicted = quat.rotate(quat.conjugate(self.q), reference)
             error = np.cross(predicted, measured)
             self.q = quat.integrate(self.q, gain * error / self.dt, self.dt)
+
+        # Face-point velocity from the rigid-body relation (parent spec 7.4).
+        # Only path needs the lever arm; face angle and tempo do not, because
+        # angular velocity is identical at every point of a rigid body.
+        r_body = np.array([0.0, 0.0, -self.lever_arm])
+        v_face = np.cross(omega - self.bias, r_body)
+        self._face_track.append(quat.rotate(self.q, v_face) * self.dt)
 
     def _dominant_axis(self) -> int:
         recent = np.array(self._omega_history[-25:])
@@ -279,6 +308,7 @@ class Pipeline:
     def _step_downswing(self, omega, accel) -> None:
         if np.linalg.norm(accel) > self.th.impact_accel_mps2:
             self._impact_window = [(self.n, self.q.copy())]
+            self._impact_track_index = len(self._face_track)
             self._enter(State.IMPACT)
 
     def _step_impact(self, omega, accel) -> None:
@@ -342,9 +372,43 @@ class Pipeline:
     def _compute(self) -> StrokeResult:
         backswing = (self.i_transition - self.i_backswing_start) * self.dt
         downswing = (self.i_impact - self.i_transition) * self.dt
+
+        # Path must be measured in the GROUND plane, for the same reason face
+        # angle is (parent spec 7.3). Body Y is tilted out of horizontal by the
+        # lie angle, so reading lateral displacement straight off it mixes
+        # vertical swing motion into the number. Gravity at address defines the
+        # plane; the stroke's own net travel defines forward within it.
+        #
+        # Where the arc actually comes from: the swing axis is tilted by the lie
+        # angle, so the head travels on a cone and its ground-plane projection
+        # curves. It is NOT produced by face rotation -- a zero-torque putter and
+        # a blade swung on the same plane trace the same path and differ only in
+        # face rotation. Measured arc is identical across all three arc types to
+        # three decimal places, and falls to 0.002 mm for a vertical shaft.
+        track = (np.cumsum(np.array(self._face_track), axis=0)
+                 if self._face_track else np.zeros((1, 3)))
+        g_hat = self.g0 / np.linalg.norm(self.g0)
+        horizontal = track - np.outer(track @ g_hat, g_hat)
+
+        travel = horizontal[-1] - horizontal[0]
+        distance = float(np.linalg.norm(travel))
+        if distance == 0.0:
+            arc, direction = 0.0, "straight"
+        else:
+            lateral = horizontal @ np.cross(g_hat, travel / distance)
+            arc = float(np.ptp(lateral))
+            before = lateral[: self._impact_track_index]
+            after = lateral[self._impact_track_index:]
+            delta = ((after.mean() if len(after) else 0.0)
+                     - (before.mean() if len(before) else 0.0))
+            if arc < self.th.path_straight_arc_m:
+                direction = "straight"
+            else:
+                direction = "in-to-out" if delta > 0 else "out-to-in"
+
         return StrokeResult(
             face_angle_deg=np.degrees(self._face_angle_at_impact()),
             tempo_ratio=backswing / downswing,
-            path_arc_m=0.0,         # Task 8
-            path_direction="unknown",
+            path_arc_m=arc,
+            path_direction=direction,
         )

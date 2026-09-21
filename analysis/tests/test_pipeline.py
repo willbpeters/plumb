@@ -114,3 +114,46 @@ def test_face_angle_does_not_depend_on_stroke_size():
                                 backswing_amplitude_deg=15.0,
                                 followthrough_amplitude_deg=15.0))[2]
     assert a.face_angle_deg == pytest.approx(b.face_angle_deg, abs=0.1)
+
+
+def test_path_direction_classified():
+    _, _, result = run_stroke(StrokeParams(arc_type=ArcType.ARCED))
+    assert result.path_direction in {"straight", "in-to-out", "out-to-in"}
+    assert result.path_arc_m > 0.0
+
+
+def test_vertical_shaft_traces_a_straight_path():
+    """The arc comes from the swing axis being tilted by the lie angle, so the
+    head travels on a cone whose ground-plane projection curves. Remove the
+    tilt and the cone degenerates to a plane: the path must go straight.
+
+    This is the test that proves the arc is real geometry rather than
+    accumulated integration error, because error would not vanish here."""
+    _, _, result = run_stroke(StrokeParams(lie_angle_deg=0.0))
+    assert result.path_arc_m < 1e-4
+    assert result.path_direction == "straight"
+
+
+@pytest.mark.parametrize("lie,expected_mm", [(5.0, 3.6), (10.0, 7.3), (20.0, 14.3)])
+def test_path_arc_grows_with_lie_angle(lie, expected_mm):
+    """A flatter lie swings the head on a more tilted cone and arcs more. The
+    expected values are measured, and they are close to linear in the lie angle
+    over this range, which is what the small-angle geometry predicts."""
+    _, _, result = run_stroke(StrokeParams(lie_angle_deg=lie))
+    assert result.path_arc_m * 1000 == pytest.approx(expected_mm, abs=0.2)
+
+
+def test_path_arc_does_not_depend_on_putter_type():
+    """Invariant 1, applied to path.
+
+    Path is swing geometry, not putter geometry. A zero-torque putter and a
+    blade swung on the same plane trace the same path and differ only in how
+    the face rotates along it. If arc magnitude tracked arc gain, the pipeline
+    would be reading face rotation into a metric that has nothing to do with
+    it."""
+    arcs = {}
+    for arc in ArcType:
+        _, _, result = run_stroke(StrokeParams(arc_type=arc))
+        arcs[arc.name] = result.path_arc_m
+    spread = max(arcs.values()) - min(arcs.values())
+    assert spread < 1e-5, f"path arc varies with putter type: {arcs}"
