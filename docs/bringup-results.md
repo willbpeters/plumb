@@ -185,3 +185,107 @@ the MCU resets without the sensor resetting.
 **Overflow reporting is inconsistent between runs.** Two earlier captures
 reported `overflows: 0` where later runs of the same firmware reported 208 and
 224. Not explained.
+
+---
+
+# Datasheet findings (2026-09-21, later session)
+
+Datasheet obtained and read: QMI8658C rev 0.9, QST Corporation. Four things
+settled, and one new defect found.
+
+## 1. FIFO read mode really does suspend acquisition — CONFIRMED
+
+FIFO_CTRL bit 7, FIFO_RD_MODE:
+
+> "This bit is automatically set by using a CTRL9 command to request the FIFO to
+> read data out of FIFO via FIFO_DATA register. It must be cleared again after
+> the data read is complete **so that writing data to the FIFO can resume**."
+
+The model behind the 19.5% prediction was right. Time in read mode is time the
+sensor is not storing samples.
+
+CTRL_CMD_REQ_FIFO also specifies the intended pattern, which this driver does
+not follow:
+
+> "The device will direct the FIFO data to the FIFO_DATA register 0x17 **until
+> the FIFO is empty**. Then the host must set FIFO_rd_mode to 0."
+
+The driver reads `min(available, capacity)` with capacity 64 against a 128-deep
+FIFO, so it can exit read mode with data still in the buffer.
+
+## 2. I²C is capped at 400 kHz — CONFIRMED
+
+Table 38: `fSCL  SCL Clock Frequency  0 .. 400 kHz`. The read-mode loss cannot be
+bought back with a faster bus.
+
+This undermines the reasoning in parent spec §6.4, which justifies FIFO batching
+by claiming it reduces bus cost "by an order of magnitude". Batching reduces
+*transaction overhead*, not data volume, and at 12 bytes per sample the volume
+dominates: 896.8 Hz × 12 B is ~25% of a 400 kHz bus no matter how it is read.
+Direct register polling costs roughly 32% of the bus and loses nothing; the FIFO
+costs ~25% and loses ~20% of samples. **§6.4's premise deserves re-examination.**
+
+## 3. The low-pass filters default to OFF — FIXED
+
+CTRL5 (0x06): `gLPF_EN` bit 4 and `aLPF_EN` bit 0 both default to 0, and this
+driver never wrote CTRL5 at all. Bandwidth options are 2.66 / 3.63 / 5.39 /
+13.37 percent of ODR.
+
+Now configured per rate:
+
+| Rate | Gyro LPF | Accel LPF | Why |
+|---|---|---|---|
+| Stroke | ON, mode 00 (23.9 Hz) | OFF | A stroke's content is under 20 Hz. Impact is a ~4 ms impulse whose leading edge must stay sharp. |
+| Max (tap test) | OFF | OFF | §5.5 hunts resonance above 500 Hz. |
+
+Effect on worst-axis σ over the full capture: 2.167 → 1.074 dps. The spiky
+environmental content went away (0.5 s window σ max fell from 4.85 to 1.22).
+
+## 4. Turn-on time is 150 ms — explains the intermittent init
+
+Table 8: `System Turn On Time  150 ms  From Software Reset, No Power, or Power
+Down`. `begin()` runs immediately after `Wire.begin()` with no settling delay,
+which is the likely cause of the first-boot `FATAL` that a reset clears.
+
+**Not yet fixed.**
+
+## 5. NEW DEFECT — the FIFO read returns corrupted data
+
+Noise depends on **position within the batch**, which is impossible for a
+stationary sensor:
+
+| Position in 64-sample batch | σ, gyro X (dps) |
+|---|---|
+| 2–7 | **0.37** |
+| 28–35 | 1.07 – 1.26 |
+| 56–63 | 1.05 – 1.34 |
+
+Early samples are roughly 3× quieter than late ones. The datasheet's gyro noise
+density is 15 mdps/√Hz, which at the LPF's 23.9 Hz bandwidth predicts σ ≈ 0.073
+dps — so even the "clean" early samples are high, but the back half of each
+batch is clearly not real data.
+
+**Every noise figure in this document is contaminated by this.** The 1.09 dps
+0.5-second-window result is not the sensor's noise floor and must not be used to
+set `stillness_gyro_std_rad`.
+
+## Where that leaves Task 9
+
+**Not measured.** The best available lower bound is the ~0.37 dps seen in the
+uncontaminated early samples, which would sit comfortably under the 0.8 dps
+stillness threshold — but that is an observation from a broken read path, not a
+measurement, and it is not evidence to build on.
+
+## Suggested next step
+
+Add a direct-register read path that bypasses the FIFO entirely (output
+registers, no CTRL9, no read mode) and re-measure the noise floor. It is a small
+change and it is decisive:
+
+- If σ falls to roughly 0.1 dps, the FIFO read path is confirmed as the fault,
+  and §6.4's FIFO-mandatory decision should be revisited — direct polling costs
+  ~7 percentage points more bus and loses nothing.
+- If σ stays near 1 dps, the noise is real and the stillness threshold needs
+  raising instead.
+
+Either outcome is actionable, which is what makes it the right next experiment.

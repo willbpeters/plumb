@@ -35,6 +35,7 @@ constexpr uint8_t kWhoAmIValue = 0x05;
 constexpr uint8_t kRegCtrl1 = 0x02;         // Serial interface / FIFO INT pin select
 constexpr uint8_t kRegCtrl2 = 0x03;         // Accelerometer: full scale + ODR
 constexpr uint8_t kRegCtrl3 = 0x04;         // Gyroscope: full scale + ODR
+constexpr uint8_t kRegCtrl5 = 0x06;         // Low-pass filter enables and modes
 constexpr uint8_t kRegCtrl7 = 0x08;         // Enable sensors (aEN/gEN)
 constexpr uint8_t kRegCtrl9 = 0x0A;         // Host command register (CTRL9 protocol)
 constexpr uint8_t kRegFifoWtmTh = 0x13;     // FIFO watermark, in samples
@@ -116,6 +117,36 @@ constexpr uint8_t kOdrSettingMax = 0x00;     // -> 7174.4 Hz, the maximum
 
 constexpr float kNominalHzStroke = 896.8f;
 constexpr float kNominalHzMax = 7174.4f;
+
+// --- CTRL5 (0x06): low-pass filters (DS-09 Table 26) ----------------------
+// bit 4 gLPF_EN, bits 6:5 gLPF_MODE, bit 0 aLPF_EN, bits 2:1 aLPF_MODE.
+// Both filters default to DISABLED, which is how this driver originally left
+// them -- CTRL5 was never written at all. Unfiltered, the gyro runs at roughly
+// ODR/2 of bandwidth, and measured resting noise was 2.17 dps worst-axis
+// against a datasheet-typical near 0.21.
+//
+// gLPF_MODE bandwidths, as a percentage of ODR:
+//   00  2.66%   01  3.63%   10  5.39%   11  13.37%
+//
+// Gyro filter ON, mode 00. At 896.8 Hz that is 23.9 Hz of bandwidth. A putting
+// stroke is a ~1.5 s motion whose content sits well under 20 Hz, so this costs
+// no signal, and noise scales with the square root of bandwidth: 448 Hz down to
+// 23.9 Hz is a 4.3x reduction. It also attenuates the environmental vibration
+// a desk transmits, which lives above 24 Hz.
+constexpr uint8_t kCtrl5StrokeFilters = 0x10;  // gLPF_EN=1, mode 00; aLPF off
+
+// Accelerometer filter deliberately OFF, at both rates.
+//
+// The accelerometer's job here is impact DETECTION, not measurement (parent
+// spec 6.4). Impact is a ~4 ms impulse and the algorithm keys off its leading
+// edge; a 23.9 Hz filter has a time constant far longer than the event and
+// would smear exactly the edge that has to stay sharp. Saturation is already
+// accepted for the same reason -- a clipped spike is a cleaner edge than an
+// unclipped one.
+
+// Tap test (spec 5.5) looks for mount resonance ABOVE 500 Hz, so every filter
+// must be off or the answer is filtered away before it is measured.
+constexpr uint8_t kCtrl5TapFilters = 0x00;
 
 // --- CTRL7: enable sensors (DS-A/DS-09 Table 22) --------------------------
 constexpr uint8_t kCtrl7EnableAccelGyro = 0x03;  // bit1 gEN=1, bit0 aEN=1
@@ -248,6 +279,13 @@ bool configureOdr(Rate rate) {
   const uint8_t ctrl3 = (uint8_t)((kGyroFs256dps << 4) | odr);
   if (!writeVerified(kRegCtrl2, ctrl2)) return false;
   if (!writeVerified(kRegCtrl3, ctrl3)) return false;
+
+  // Filters follow the rate, because the two rates exist for different jobs.
+  // Stroke rate measures a slow motion and wants the noise gone; tap rate is
+  // hunting a resonance above 500 Hz and must see the whole band.
+  const uint8_t ctrl5 =
+      (rate == Rate::Max) ? kCtrl5TapFilters : kCtrl5StrokeFilters;
+  if (!writeVerified(kRegCtrl5, ctrl5)) return false;
   return true;
 }
 
