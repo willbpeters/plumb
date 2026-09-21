@@ -16,21 +16,38 @@ GRAVITY = 9.81
 INT16_MAX = 32767
 INT16_MIN = -32768
 
+# The full-scale divisor is 2^15, not INT16_MAX. These differ by one count and
+# they mean different things: 32767 is where the output CLIPS, while 32768 is
+# what the full-scale range maps to. The datasheet settles it -- it quotes
+# 128 LSB/dps at +/-256 dps, and 256 * 128 = 32768 exactly.
+FULL_SCALE_COUNTS = 32768
+
 
 @dataclass(frozen=True)
 class FullScale:
-    """Configured ranges (parent spec 6.4). One LSB is the resolution floor."""
+    """Configured ranges (parent spec 6.4). One LSB is the resolution floor.
 
-    gyro_dps: float = 250.0
+    The gyro range is +/-256 dps, not the +/-250 the spec originally called for.
+    The QMI8658's gyro full-scale table is powers of two -- 16, 32, 64, 128, 256,
+    512, 1024, 2048 dps -- and +/-250 simply does not exist on this part. It is an
+    InvenSense convention, easy to carry across from an MPU-6050. Confirmed
+    against the QST datasheet (rev 0.9 and rev A) and an independent driver.
+
+    This is not cosmetic: configuring the sensor at +/-256 while converting at
+    +/-250 would make every recovered rate 2.4% low, which is a systematic scale
+    error straight into every integrated angle.
+    """
+
+    gyro_dps: float = 256.0
     accel_g: float = 16.0
 
     @property
     def gyro_rad_per_count(self) -> float:
-        return np.radians(self.gyro_dps) / INT16_MAX
+        return np.radians(self.gyro_dps) / FULL_SCALE_COUNTS
 
     @property
     def accel_mps2_per_count(self) -> float:
-        return self.accel_g * GRAVITY / INT16_MAX
+        return self.accel_g * GRAVITY / FULL_SCALE_COUNTS
 
 
 @dataclass(frozen=True)

@@ -155,5 +155,18 @@ def test_path_arc_does_not_depend_on_putter_type():
     for arc in ArcType:
         _, _, result = run_stroke(StrokeParams(arc_type=arc))
         arcs[arc.name] = result.path_arc_m
+
     spread = max(arcs.values()) - min(arcs.values())
-    assert spread < 1e-5, f"path arc varies with putter type: {arcs}"
+    mean_arc = sum(arcs.values()) / len(arcs)
+
+    # The bound is relative, and it is floored by quantization rather than by
+    # anything about putters. One gyro LSB is 1.36e-4 rad/s; integrated over
+    # roughly a thousand samples with a 0.85 m lever arm, that dither random-
+    # walks to about 7 um of displacement. Measured spread is ~11 um on a
+    # ~14.3 mm arc, which is 0.08% -- the floor, not a signal.
+    #
+    # 0.5% leaves six times that margin while still catching a real dependence:
+    # the arc-type defect this suite found in face angle was 1.8% of its value.
+    assert spread < 0.005 * mean_arc, (
+        f"path arc varies with putter type by {100 * spread / mean_arc:.3f}%: {arcs}"
+    )

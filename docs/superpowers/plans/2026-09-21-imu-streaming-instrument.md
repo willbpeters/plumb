@@ -506,7 +506,7 @@ Firmware begins here. Verified by compiling, and by the read-back check that Ste
 Find the QMI8658 datasheet. Record, as named constants in `qmi8658.cpp`:
 
 - Control register addresses for accelerometer config, gyroscope config, and the FIFO
-- The encoding for gyro full scale **±250 dps** and accel full scale **±16 g** (§6.4)
+- The encoding for gyro full scale **±256 dps** and accel full scale **±16 g** (§6.4, amended: the QMI8658 table is powers of two and has no ±250 setting)
 - The ODR encoding table, and specifically: the value nearest **500 Hz**, and the **maximum** supported
 - FIFO depth, watermark configuration, and the FIFO status/overflow register
 - Which register enables the FIFO watermark interrupt, and on which INT pin
