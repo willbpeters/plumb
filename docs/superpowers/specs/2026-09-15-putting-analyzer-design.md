@@ -320,7 +320,17 @@ resolution per buffer, double-buffered, is followed.
 ### 6.4 IMU acquisition
 
 - Sample rate: **500 Hz** during an armed stroke, 100 Hz while monitoring for address.
-- Full-scale ranges: gyro ±250 dps, accelerometer ±16 g.
+- Full-scale ranges: gyro **±256 dps**, accelerometer ±16 g.
+
+  *Amended 2026-09-21.* This previously read ±250 dps, which the QMI8658 cannot
+  produce. Its gyro full-scale table is powers of two — ±16, 32, 64, 128, 256,
+  512, 1024, 2048 dps. ±250 is an InvenSense convention and was carried across in
+  error. Confirmed against the QST datasheet (rev 0.9 and rev A), which also
+  quotes 128 LSB/dps at ±256 dps — and 256 × 128 = 32768 exactly, which fixes the
+  full-scale divisor at 2^15 rather than at INT16_MAX. Configuring the part at
+  ±256 while converting counts at ±250 would have made every recovered rate 2.4%
+  low: a systematic scale error in every integrated angle, invisible without a
+  reference. `FullScale` in `analysis/plumb/sensor.py` is amended to match.
 - **FIFO batching is mandatory.** A 12-byte burst read costs ~325 µs on a 400 kHz I²C bus;
   polling single samples at 500 Hz consumes ~16% of the bus and a great deal of CPU. Batched
   FIFO reads triggered by the QMI8658 interrupt reduce this by an order of magnitude.

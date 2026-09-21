@@ -3,7 +3,11 @@ name = "plumb"
 version = "0.1.0"
 description = "Synthetic stroke harness and algorithm development for the Plumb putting analyzer"
 requires-python = ">=3.11"
-dependencies = ["numpy>=2.0", "scipy>=1.13"]
+dependencies = [
+    "numpy>=2.0",
+    "pyserial>=3.5",
+    "scipy>=1.13",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

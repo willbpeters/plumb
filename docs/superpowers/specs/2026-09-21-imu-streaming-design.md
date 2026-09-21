@@ -60,7 +60,7 @@ everything that does not.
 | File | Responsibility | Ports to ESP-IDF |
 |---|---|---|
 | `qmi8658.h` / `qmi8658.cpp` | Register-level driver: init, ODR and full-scale configuration, FIFO drain, status and overflow reporting | **Yes** |
-| `stream.h` / `stream.cpp` | Output framing — CSV and binary | No |
+| `framing.h` / `framing.cpp` | Output framing — CSV and binary | No |
 | `imu_stream.ino` | Setup, main loop, serial command handling | No |
 
 The driver knows nothing about serial ports or output formats. That boundary is what makes the
@@ -71,7 +71,7 @@ Location: `firmware/bringup-arduino/imu_stream/`, alongside the existing `smoke_
 
 ## 4. Sensor configuration
 
-**Full-scale ranges: gyro ±250 dps, accelerometer ±16 g** (§6.4).
+**Full-scale ranges: gyro ±256 dps, accelerometer ±16 g** (§6.4, amended 2026-09-21 — ±250 dps does not exist on this part; the QMI8658 gyro table is powers of two).
 
 These are deliberately identical to `FullScale` in `analysis/plumb/sensor.py`, so that a count
 means the same physical quantity in firmware and in Python. Any divergence here would silently
@@ -183,7 +183,7 @@ non-numerical dependency.
 
 Importing `FullScale` rather than redefining the scale factors means counts-to-physical
 conversion is defined in exactly one place across the entire project, firmware constants
-included. A capture script with its own copy of "±250 dps over 16 bits" is a second source of
+included. A capture script with its own copy of "±256 dps over 16 bits" is a second source of
 truth that will eventually disagree with the first.
 
 ## 9. Acceptance criteria

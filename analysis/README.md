@@ -51,10 +51,10 @@ worst face-angle error : 0.0809 deg  (target 1.0 deg)
 meets face target up to: 0.50 dps gyro noise
 
  noise dps   detected   worst face err   worst tempo err
-      0.00       100%           0.0071            0.0169
-      0.05       100%           0.0099            0.0244
-      0.10       100%           0.0183            0.0288
-      0.20       100%           0.0363            0.0350
+      0.00       100%           0.0016            0.0170
+      0.05       100%           0.0100            0.0236
+      0.10       100%           0.0180            0.0289
+      0.20       100%           0.0357            0.0349
       0.50       100%           0.0809            0.0969
       1.00         0%              nan               nan
       2.00         0%              nan               nan
@@ -67,7 +67,7 @@ and 0% above it**, not a uniform 71%. See the detection cliff below.
 
 | Criterion | Result |
 |---|---|
-| Noiseless face angle well under 0.1° | **0.0071°** |
+| Noiseless face angle well under 0.1° | **0.0016°** |
 | Degradation graceful and predictable | Monotonic across four decades of noise |
 | Noise level where ±1.0° is exceeded can be stated | Face angle holds to **0.5 dps**; the binding limit is detection, not accuracy |
 | Zero-torque recovers as well as arced | Arc-type spread in error **0.000166°** |
@@ -134,6 +134,14 @@ Fixed, and documented in
 - **Quaternions:** Hamilton, scalar-first `(w, x, y, z)`, body→reference.
 - **World frame:** X = target line, Y = horizontal perpendicular, Z = up, gravity `(0,0,−9.81)`.
 - **Body frame:** Z = shaft axis (head→butt), X = face normal.
+- **Full scale:** gyro ±256 dps, accel ±16 g. The gyro range is *not* ±250 — that
+  value does not exist on the QMI8658, whose table is powers of two, and the parent
+  spec was amended on 2026-09-21. The full-scale divisor is 2¹⁵, not `INT16_MAX`:
+  the datasheet's 128 LSB/dps at ±256 dps settles it, since 256 × 128 = 32768.
+- **Sample rate:** `SAMPLE_RATE_HZ = 500.0` is still an assumption. The QMI8658's
+  gyro ODR table has no 500 Hz entry — the neighbours are 448.4 and 896.8 Hz — so
+  this constant and every number above will be re-baselined once the rate is
+  chosen and then measured on hardware.
 - **Randomness:** explicit `numpy.random.Generator`, seeds passed as arguments. Global random
   state is never used — the accuracy study is a deliverable, and a result nobody can re-run is
   worth substantially less.
