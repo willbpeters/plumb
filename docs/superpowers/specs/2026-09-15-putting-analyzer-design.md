@@ -42,6 +42,36 @@ These are explicitly out of scope and will not be built:
 - Full-swing (non-putting) analysis. Load cases and sample rates differ substantially.
 - Absolute face angle relative to the target line. See §3.3.
 
+### 1.2.1 Deferred — considered, postponed, not rejected
+
+Distinct from §1.2: these are wanted, but not in the first build.
+
+**Putt distance approximation.** Calibrate before a round by striking putts at a few known
+paces — say 5, 10 and 15 — and thereafter estimate distance from the measured stroke.
+
+The measurement side is nearly free. Clubhead speed at impact falls out of `v = ω × r`, the
+same relation §7.4 already uses for path, so the device can report impact speed today at no
+extra cost. **Impact speed is therefore not deferred — it is a first-build metric.**
+
+Mapping speed to *distance* is the hard part, and it is deferred because it is a different
+kind of problem from everything else in this spec. Face angle and tempo are properties of the
+putter that a rigid-body argument makes exactly recoverable. Distance is a property of the
+**ball, the strike and the green**, and the device measures none of them:
+
+- **Strike quality.** A toe or heel hit transfers less energy for the same clubhead speed. The
+  device cannot see where on the face contact happened.
+- **Green speed.** The same stroke runs very differently on a Stimp 8 green and a Stimp 12.
+- **Slope.** Uphill and downhill change the answer entirely.
+
+Per-round calibration handles green speed, which is why the proposed approach is sound — it
+calibrates the one unknown that stays constant for a round. It cannot handle strike quality or
+slope.
+
+So it should be built as an **approximation, labelled as one**, and its accuracy target set
+after measurement rather than before. It would also be the first metric in this device whose
+accuracy depends on the golfer's consistency rather than on the instrument, which is worth
+being clear about before it ships.
+
 ### 1.3 Project positioning
 
 This is a portfolio project whose purpose is to demonstrate depth in embedded systems,
