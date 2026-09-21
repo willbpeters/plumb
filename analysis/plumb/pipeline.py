@@ -94,6 +94,7 @@ class Pipeline:
         self._last_same_sign_n = None
         self._backswing_axis = None
         self._backswing_sign = None
+        self._prev_magnitude = None
         self._impact_window: list[tuple[int, np.ndarray]] = []
 
         self._face_track: list[np.ndarray] = []
@@ -181,10 +182,40 @@ class Pipeline:
         than lookahead and remains implementable on-device.
         """
         corrected = omega - self.bias
-        magnitude = np.linalg.norm(corrected)
 
+        # Measure the swing using only the component PERPENDICULAR to the shaft.
+        #
+        # Face rotation is rotation ABOUT the shaft axis (body Z), so the full
+        # 3-axis magnitude mixes it into the swing measurement, and the onset
+        # threshold then fires earlier for a putter whose face turns more. That
+        # is segmentation keying off rotation amplitude, which invariant 1
+        # prohibits -- measured as a one-sample shift in the recorded stroke
+        # start between an arced and a zero-torque putter, identical in every
+        # other respect.
+        #
+        # The perpendicular component is exactly |theta_dot|, because the swing
+        # contributes theta_dot * (sin phi, cos phi, 0) and sin^2 + cos^2 = 1.
+        # It is independent of face rotation by construction, not by tuning.
+        magnitude = np.linalg.norm(corrected[:2])
+
+        # Back-extrapolate the onset instead of taking the last quiet sample.
+        #
+        # The stroke begins where the rate is zero, but any threshold is crossed
+        # later, by an amount that depends on the threshold itself -- so the
+        # recorded start inherits the arbitrariness of a guessed constant, which
+        # is what invariant 5 warns about. The rate rises essentially linearly
+        # out of rest, so extrapolating the two samples that straddle the
+        # threshold back to zero recovers the onset to a fraction of a sample
+        # and barely depends on where the threshold sits.
+        #
+        # Uses the previous sample only: past data, one stored float.
         if magnitude < self.th.onset_gyro_rad:
             self._last_quiet_n = self.n
+        elif self._prev_magnitude is not None and self._prev_magnitude < self.th.onset_gyro_rad:
+            rise = magnitude - self._prev_magnitude
+            if rise > 0.0:
+                self._last_quiet_n = self.n - 1 - self._prev_magnitude / rise
+        self._prev_magnitude = magnitude
 
         if magnitude > self.th.backswing_gyro_rad:
             self._hold += 1
