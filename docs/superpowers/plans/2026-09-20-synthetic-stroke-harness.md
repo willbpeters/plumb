@@ -1192,6 +1192,19 @@ The 0.05 tolerance is the parent spec §3 product target, not a number chosen to
 
 The QMI8658's noise density puts datasheet-typical near 0.16 dps at this bandwidth, comfortably inside the target. The 1.0 dps onset gate is a placeholder like every other threshold (invariant 5) and gets derived from the real corpus in Phase 2, where deriving it from the measured stillness variance is the obvious candidate.
 
+**Margin is thin at high tempo ratios, and that is recorded rather than tuned away.** With the half-sample transition correction and the onset gate at its placeholder 1.0 dps:
+
+| Tempo | Error |
+|---|---|
+| 1.5:1 | −0.018 |
+| 2.0:1 | −0.026 |
+| 2.5:1 | −0.034 |
+| 3.0:1 | −0.043 |
+
+Worst case 0.043 against a 0.05 target — 15% margin, and the error grows monotonically with tempo ratio because a faster downswing makes each sample a larger fraction of it. Dropping the onset gate to 0.25 dps would take the worst case to 0.017, and that is deliberately NOT done: tuning a threshold until a test passes is what invariant 5 exists to prevent, and the gate has to survive real gyro noise that this sweep does not yet contain.
+
+Face angle, the metric this harness exists to prove, has roughly a thousand times more margin. Tempo is the tighter constraint and the one Phase 2 should look at first.
+
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cd analysis && uv run pytest tests/test_pipeline.py -k tempo -v`
@@ -1278,7 +1291,14 @@ Add to `Pipeline`, and extend the `step()` dispatch to call them:
         if np.sign(corrected[axis]) == self._backswing_sign:
             self._last_same_sign_n = self.n
         elif abs(corrected[axis]) > self.th.transition_gyro_rad:
-            self.i_transition = self._last_same_sign_n
+            # The rate crossed zero somewhere BETWEEN the last same-sign sample
+            # and the next one, so the last same-sign sample is the near edge of
+            # the bracket, not the crossing. Taking it directly biases the
+            # transition half a sample early and, because backswing and
+            # downswing sit on opposite sides of it, that half sample is
+            # subtracted from one and added to the other -- it enters the tempo
+            # ratio twice, with the same sign.
+            self.i_transition = self._last_same_sign_n + 0.5
             self._enter(State.DOWNSWING)
 
     def _step_downswing(self, omega, accel) -> None:

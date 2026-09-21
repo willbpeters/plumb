@@ -266,7 +266,14 @@ class Pipeline:
         if np.sign(corrected[axis]) == self._backswing_sign:
             self._last_same_sign_n = self.n
         elif abs(corrected[axis]) > self.th.transition_gyro_rad:
-            self.i_transition = self._last_same_sign_n
+            # The rate crossed zero somewhere BETWEEN the last same-sign sample
+            # and the next one, so the last same-sign sample is the near edge of
+            # the bracket, not the crossing. Taking it directly biases the
+            # transition half a sample early and, because backswing and
+            # downswing sit on opposite sides of it, that half sample is
+            # subtracted from one and added to the other -- it enters the tempo
+            # ratio twice, with the same sign.
+            self.i_transition = self._last_same_sign_n + 0.5
             self._enter(State.DOWNSWING)
 
     def _step_downswing(self, omega, accel) -> None:
