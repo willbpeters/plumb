@@ -83,3 +83,45 @@ def test_csv_line_parses_to_seq_and_counts():
 def test_csv_comment_and_blank_lines_are_ignored():
     assert parse_csv_line("# measured ODR 501.3 Hz") is None
     assert parse_csv_line("") is None
+
+
+# append to analysis/tests/test_capture.py
+
+from tools.capture import CaptureStats, accumulate
+
+
+def test_contiguous_batches_report_no_gaps():
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 100, [(0,) * 6] * 4))
+    accumulate(stats, Batch(4, False, 200, [(0,) * 6] * 4))
+    assert stats.samples == 8
+    assert stats.dropped == 0
+    assert stats.overflows == 0
+
+
+def test_a_sequence_gap_is_counted_not_hidden():
+    """A dropped sample breaks the time base silently -- nothing downstream can
+    detect it afterwards. The capture must count it at the moment it happens."""
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 100, [(0,) * 6] * 4))
+    accumulate(stats, Batch(10, False, 200, [(0,) * 6] * 4))
+    assert stats.dropped == 6
+
+
+def test_overflow_flags_are_counted():
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, True, 100, [(0,) * 6]))
+    assert stats.overflows == 1
+
+
+def test_measured_odr_uses_first_and_last_drain_timestamps():
+    """Nominal rate is not trusted. A real rate of 502 Hz against an assumed 500
+    puts a 0.4 percent scale error into every integrated angle."""
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 0, [(0,) * 6] * 500))
+    accumulate(stats, Batch(500, False, 1_000_000, [(0,) * 6] * 500))
+    assert stats.measured_odr_hz() == pytest.approx(500.0, rel=1e-3)
+
+
+def test_measured_odr_is_none_before_two_batches():
+    assert CaptureStats().measured_odr_hz() is None
