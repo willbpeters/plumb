@@ -60,7 +60,7 @@ everything that does not.
 | File | Responsibility | Ports to ESP-IDF |
 |---|---|---|
 | `qmi8658.h` / `qmi8658.cpp` | Register-level driver: init, ODR and full-scale configuration, FIFO drain, status and overflow reporting | **Yes** |
-| `stream.h` / `stream.cpp` | Output framing — CSV and binary | No |
+| `framing.h` / `framing.cpp` | Output framing — CSV and binary | No |
 | `imu_stream.ino` | Setup, main loop, serial command handling | No |
 
 The driver knows nothing about serial ports or output formats. That boundary is what makes the

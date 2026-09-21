@@ -48,8 +48,8 @@ Two values are already known, confirmed on hardware by the existing smoke test:
 |---|---|
 | `firmware/bringup-arduino/imu_stream/qmi8658.h` | Driver interface: config struct, sample struct, function declarations |
 | `firmware/bringup-arduino/imu_stream/qmi8658.cpp` | Register map, init, ODR/FSR config, FIFO drain, status. **No serial, no formatting.** |
-| `firmware/bringup-arduino/imu_stream/stream.h` | Output interface: format enum, emit functions |
-| `firmware/bringup-arduino/imu_stream/stream.cpp` | CSV and binary framing |
+| `firmware/bringup-arduino/imu_stream/framing.h` | Output interface: format enum, emit functions |
+| `firmware/bringup-arduino/imu_stream/framing.cpp` | CSV and binary framing |
 | `firmware/bringup-arduino/imu_stream/imu_stream.ino` | Setup, loop, single-character serial commands |
 | `analysis/tools/capture.py` | Host decoder and capture CLI |
 | `analysis/tests/test_capture.py` | Decoder tests |
@@ -645,10 +645,10 @@ git commit -m "Add QMI8658 driver with configuration read-back"
 ## Task 4: Output formatting
 
 **Files:**
-- Create: `firmware/bringup-arduino/imu_stream/stream.h`
-- Create: `firmware/bringup-arduino/imu_stream/stream.cpp`
+- Create: `firmware/bringup-arduino/imu_stream/framing.h`
+- Create: `firmware/bringup-arduino/imu_stream/framing.cpp`
 
-- [ ] **Step 1: Write `stream.h`**
+- [ ] **Step 1: Write `framing.h`**
 
 ```cpp
 // Wire formats for the IMU streaming instrument.
@@ -676,10 +676,10 @@ void emitBinary(Stream& out, uint32_t firstSeq, const Sample* samples,
 }  // namespace stream
 ```
 
-- [ ] **Step 2: Implement `stream.cpp`**
+- [ ] **Step 2: Implement `framing.cpp`**
 
 ```cpp
-#include "stream.h"
+#include "framing.h"
 
 namespace {
 constexpr uint8_t kSync0 = 0xA5;
@@ -736,7 +736,7 @@ Expected: compiles clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add firmware/bringup-arduino/imu_stream/stream.h firmware/bringup-arduino/imu_stream/stream.cpp
+git add firmware/bringup-arduino/imu_stream/framing.h firmware/bringup-arduino/imu_stream/framing.cpp
 git commit -m "Add CSV and binary output framing"
 ```
 
@@ -764,7 +764,7 @@ git commit -m "Add CSV and binary output framing"
 #include <Wire.h>
 
 #include "qmi8658.h"
-#include "stream.h"
+#include "framing.h"
 
 static const int PIN_SDA = 6;   // spec 4.2
 static const int PIN_SCL = 7;
