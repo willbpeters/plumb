@@ -68,6 +68,17 @@ Ground truth is the value the caller asked for. This also demonstrates §4.3 con
 
 **Gravity direction at address, in body coordinates**, is `(0, sin(lie), cos(lie))` — not the body Z axis unless `lie` is zero. The pipeline measures this as `g0` and it defines the ground plane.
 
+**The twist and the azimuth are not the same quantity, and that is expected.** The pipeline extracts face angle as the twist of the address-relative attitude about `g0`. The generator's ground truth is the azimuth of the face normal in the ground plane. These agree to third order but not exactly:
+
+| Face angle | twist about `g0` | difference |
+|---|---|---|
+| 2.0° | 1.999919° | −8.1e-5° |
+| 5.0° | 4.998742° | −1.3e-3° |
+
+Verified numerically against `plumb.quat` before Task 3 was written. About 1.3 milli-degrees at 5°, which is why the pipeline tests assert `abs=0.1` rather than machine precision, while the generator's own self-consistency test in Task 3 asserts `abs=1e-6` — the generator is checked against its own definition, the pipeline against a different-but-equivalent one.
+
+Do not try to drive this residual to zero. It is inherent to the two definitions, it is four orders of magnitude below the ±1.0° product target from parent spec §3, and chasing it would mean replacing a decomposition the firmware can compute cheaply with one it cannot.
+
 ---
 
 ## File Structure
