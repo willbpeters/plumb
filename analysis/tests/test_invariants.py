@@ -36,9 +36,20 @@ def test_invariant_2_accel_correction_must_stay_off_during_the_stroke():
     If this test ever passes with the gain restored, the gain schedule is not
     doing anything and the reasoning in parent spec 7.2 is wrong. Keeping it is
     how we know the schedule is load-bearing rather than superstition."""
+    # 5.0 rad/s per unit of error is a typical complementary-filter Kp -- the
+    # sort of value a stock Madgwick or Mahony implementation ships with. That
+    # is the point: the invariant is about what happens when you use a normal
+    # filter normally, not an absurd setting.
+    #
+    # Calibrated after the gain was corrected to be a rate rather than a
+    # per-sample step. Measured, gain left on through the stroke:
+    #   0.5 -> 0.0005 deg    1.0 -> 0.0025    2.0 -> 0.0043
+    #   5.0 -> 2.70 deg      10.0 -> 349 deg
+    # 5.0 is the first value that clearly exceeds the +/-1.0 deg target in
+    # parent spec section 3.
     stroke = StrokeParams(face_angle_at_impact_deg=2.0)
     correct = recover(stroke)
-    naive = recover(stroke, Thresholds(accel_gain_stroke=0.05))
+    naive = recover(stroke, Thresholds(accel_gain_stroke=5.0))
 
     correct_error = abs(correct.face_angle_deg - 2.0)
     naive_error = abs(naive.face_angle_deg - 2.0)

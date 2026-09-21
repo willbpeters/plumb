@@ -7,8 +7,8 @@ that validates the §7 fusion pipeline with **no hardware at all**.
 
 ```bash
 uv sync
-uv run pytest                   # the algorithm's test suite (65 tests, ~20 s)
-uv run python -m plumb.sweep    # the full parameter sweep (~4 min)
+uv run pytest                   # the algorithm's test suite (78 tests, ~20 s)
+uv run python -m plumb.sweep    # the full parameter sweep (~8 min)
 ```
 
 ## What this proves, and what it does not
@@ -47,18 +47,22 @@ From `uv run python -m plumb.sweep`, 2835 strokes over face angle (−5° … +5
 ```
 strokes simulated      : 2835
 detection rate         : 71.4%  (parent spec section 3 target: 98%)
-worst face-angle error : 0.0809 deg  (target 1.0 deg)
+worst face-angle error : 0.0756 deg  (target 1.0 deg)
 meets face target up to: 0.50 dps gyro noise
 
  noise dps   detected   worst face err   worst tempo err
-      0.00       100%           0.0016            0.0170
-      0.05       100%           0.0100            0.0236
-      0.10       100%           0.0180            0.0289
-      0.20       100%           0.0357            0.0349
-      0.50       100%           0.0809            0.0969
+      0.00       100%           0.0012            0.0090
+      0.05       100%           0.0087            0.0244
+      0.10       100%           0.0160            0.0301
+      0.20       100%           0.0307            0.0354
+      0.50       100%           0.0756            0.0423
       1.00         0%              nan               nan
       2.00         0%              nan               nan
 ```
+
+At 896.8 Hz, **tempo meets the §3 target of 0.05 at every noise level where the
+stroke is detected at all** — worst 0.0423. At the previously assumed 500 Hz it
+failed at 0.5 dps, at 0.0969.
 
 Read the headline detection rate carefully: it is **100% at every noise level up to 0.5 dps
 and 0% above it**, not a uniform 71%. See the detection cliff below.
@@ -67,14 +71,14 @@ and 0% above it**, not a uniform 71%. See the detection cliff below.
 
 | Criterion | Result |
 |---|---|
-| Noiseless face angle well under 0.1° | **0.0016°** |
+| Noiseless face angle well under 0.1° | **0.0012°** |
 | Degradation graceful and predictable | Monotonic across four decades of noise |
 | Noise level where ±1.0° is exceeded can be stated | Face angle holds to **0.5 dps**; the binding limit is detection, not accuracy |
-| Zero-torque recovers as well as arced | Arc-type spread in error **0.000166°** |
+| Zero-torque recovers as well as arced | Arc-type spread in error **0.000018°** |
 | Reproducible from a seed, one command | Yes — `test_sweep_is_reproducible` |
 
 For scale: the QMI8658's noise density puts datasheet-typical near **0.16 dps** at this
-bandwidth, where worst face error is about 0.03°.
+bandwidth, where worst face error is about 0.025°.
 
 ## Two limits worth knowing before hardware
 
@@ -85,11 +89,14 @@ it is detection that fails first. The stillness threshold therefore has a hard f
 the sensor's real noise, and deriving it from measured stillness variance is the obvious
 Phase 2 candidate (§7.1, invariant 5).
 
-**Tempo is the tighter metric.** It meets the §3 target of 0.05 up to about 0.2 dps, where
-face angle has roughly thirty times more margin. Tempo depends on resolving *when the rate
-left zero*, which is only as sharp as the noise floor allows. It is also partly definitional:
-the reference system will decide where a backswing begins by its own criterion, so this target
-deserves revisiting once paired measurements exist.
+**Tempo is still the tighter metric, but it now clears its target everywhere detection
+works.** Worst case 0.0423 against the §3 target of 0.05, where face angle has roughly
+thirteen times more margin. It was 0.0969 — a failure — at the previously assumed 500 Hz;
+raising the rate to 896.8 Hz is what closed it, because tempo depends on resolving *when
+the rate left zero* and that is limited by sample resolution and the noise floor.
+
+The target is also partly definitional: the reference system will decide where a backswing
+begins by its own criterion, so it deserves revisiting once paired measurements exist.
 
 ## Design decisions that are load-bearing
 
@@ -121,6 +128,15 @@ is not confirmed until ~53 samples after motion begins, so the machine still rea
 while the stroke is underway. Correcting against the accelerometer there is exactly the failure
 invariant 2 describes, and the injected error is then frozen in.
 
+**The correction gain is a rate, not a per-sample step.** Writing `gain * error / dt` and then
+integrating over `dt` cancels the `dt`, so each *sample* applies a fixed rotation and the
+correction applied per *second* scales with the sample rate — the same constant silently means
+something different at every ODR. Moving from 500 Hz to 896.8 Hz exposed it: worst face-angle
+error under noise went from 0.014° to 0.236° and the degradation curve stopped being monotonic,
+while nothing about the modelled sensor had got worse. Changing the sample rate is, in effect,
+a test for rate-independence, and it is worth running deliberately after any change to the
+filter.
+
 **Face angle is not shaft rotation.** Rotating a shaft tilted by lie angle `λ` through `φ`
 moves the face normal by `atan(tan(φ)·cos(λ))` in the ground plane. At λ=20° and φ=2° that is
 1.880°, not 2.000°. The generator is parameterized by the reportable quantity and solves for
@@ -138,10 +154,14 @@ Fixed, and documented in
   value does not exist on the QMI8658, whose table is powers of two, and the parent
   spec was amended on 2026-09-21. The full-scale divisor is 2¹⁵, not `INT16_MAX`:
   the datasheet's 128 LSB/dps at ±256 dps settles it, since 256 × 128 = 32768.
-- **Sample rate:** `SAMPLE_RATE_HZ = 500.0` is still an assumption. The QMI8658's
-  gyro ODR table has no 500 Hz entry — the neighbours are 448.4 and 896.8 Hz — so
-  this constant and every number above will be re-baselined once the rate is
-  chosen and then measured on hardware.
+- **Sample rate:** 896.8 Hz — still *nominal*, not measured. The QMI8658's ODR steps
+  derive from the gyro's natural frequency rather than round numbers, so the spec's
+  original 500 Hz does not exist; the neighbours are 448.4 and 896.8 Hz, and 896.8
+  was chosen because tempo error scales with sample resolution and tempo is the
+  binding constraint (parent spec §6.4, amended 2026-09-21). MEMS oscillators run a
+  few percent off nominal, and that error goes straight into every integrated angle,
+  so this constant and every number above get re-baselined once Task 8 of the
+  bring-up plan measures the achieved rate on the real board.
 - **Randomness:** explicit `numpy.random.Generator`, seeds passed as arguments. Global random
   state is never used — the accuracy study is a deliverable, and a result nobody can re-run is
   worth substantially less.

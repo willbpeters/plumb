@@ -13,7 +13,17 @@ import numpy as np
 
 from plumb import quat
 
-SAMPLE_RATE_HZ = 500.0
+# The QMI8658's ODR steps derive from the gyro's natural frequency, not from
+# round numbers, so the spec's original 500 Hz does not exist on this part. The
+# neighbours are 448.4 and 896.8 Hz; 896.8 was chosen because tempo ratio is the
+# binding accuracy constraint and tempo error scales with sample resolution
+# (parent spec 6.4, amended 2026-09-21).
+#
+# Still nominal, not measured. MEMS oscillators run a few percent off, and that
+# error goes straight into every integrated angle. Task 8 of the bring-up plan
+# measures the achieved rate on the real board; this constant and every number
+# in README.md get re-baselined on it.
+SAMPLE_RATE_HZ = 896.8
 
 
 class ArcType(Enum):

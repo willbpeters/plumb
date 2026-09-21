@@ -319,7 +319,24 @@ resolution per buffer, double-buffered, is followed.
 
 ### 6.4 IMU acquisition
 
-- Sample rate: **500 Hz** during an armed stroke, 100 Hz while monitoring for address.
+- Sample rate: **896.8 Hz** during an armed stroke, **112.1 Hz** while monitoring for address.
+
+  *Amended 2026-09-21.* This previously read 500 Hz and 100 Hz. Neither exists on
+  the QMI8658, whose ODR steps derive from the gyro's natural frequency rather
+  than from round numbers: 28.025, 56.05, 112.1, 224.2, 448.4, 896.8, 1793.6,
+  3587.2, 7174.4 Hz. The choice for the stroke rate was between the two
+  neighbours of 500 Hz, and 896.8 was taken rather than the nearer 448.4 on
+  measured evidence — the synthetic harness found tempo ratio to be the binding
+  accuracy constraint, with far less headroom than face angle, and tempo error
+  scales directly with sample resolution. Doubling the rate roughly halves it and
+  quarters the integration error.
+
+  The cost is current draw, which is **not yet measured**: this board has battery
+  voltage sense but no current sense, so it needs an inline power meter. It is
+  bounded by duty cycle — the device sleeps between strokes (§9), so the higher
+  rate runs only during the ~1.5 s a stroke is being measured. If the §4.3 power
+  budget or the ≥500-strokes-per-charge target in §3 later proves tight, 448.4 Hz
+  is a one-constant change back.
 - Full-scale ranges: gyro **±256 dps**, accelerometer ±16 g.
 
   *Amended 2026-09-21.* This previously read ±250 dps, which the QMI8658 cannot

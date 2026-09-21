@@ -74,7 +74,7 @@ constexpr uint8_t kAccelFs16g = 0x03;
 // independent sources, not an omission. +-256 dps (setting 100) is the
 // nearest available range to the requested +-250 dps. See the task report:
 // this is a deliberate "nearest documented value" choice, not a guess.
-constexpr uint8_t kGyroFsNearest250dps = 0x04;  // +-256 dps
+constexpr uint8_t kGyroFs256dps = 0x04;  // +-256 dps
 
 // --- ODR encoding, CTRL2 bits 3:0 (aODR<3:0>) / CTRL3 bits 3:0 (gODR<3:0>)
 // DS-A/DS-09 Table 22. When accel and gyro are both enabled and both feed
@@ -90,16 +90,31 @@ constexpr uint8_t kGyroFsNearest250dps = 0x04;  // +-256 dps
 //   0000     7174.4   <- maximum
 //   0001     3587.2
 //   0010     1793.6
-//   0011      896.8
-//   0100      448.4   <- nearest to 500 Hz (|500-448.4|=51.6 vs |896.8-500|=396.8)
+//   0011      896.8   <- stroke rate (see below)
+//   0100      448.4
 //   0101      224.2
 //   0110      112.1
 //   0111       56.05
 //   1000       28.025
-constexpr uint8_t kOdrSetting448Hz = 0x04;   // -> 448.4 Hz, nearest to 500 Hz
-constexpr uint8_t kOdrSetting7174Hz = 0x00;  // -> 7174.4 Hz, the maximum
+//
+// Stroke rate is 896.8 Hz, the step ABOVE the spec's original 500 Hz rather
+// than the nearer 448.4 below it. 500 Hz is not on this table at all, so the
+// choice was between the two neighbours, and it was made on measured evidence:
+// the synthetic harness found tempo ratio to be the binding accuracy
+// constraint, with far less headroom than face angle, and tempo error scales
+// directly with sample resolution. Doubling the rate roughly halves it and
+// quarters the integration error.
+//
+// The cost is current draw, which is NOT yet measured on this board -- it has
+// battery voltage sense but no current sense, so it needs an inline power
+// meter. It is bounded by duty cycle: the device sleeps between strokes
+// (spec 9), so the higher rate runs only during the ~1.5 s a stroke is being
+// measured, not continuously. If the section 4.3 power budget later proves
+// tight, this is a one-constant change back.
+constexpr uint8_t kOdrSettingStroke = 0x03;  // -> 896.8 Hz
+constexpr uint8_t kOdrSettingMax = 0x00;     // -> 7174.4 Hz, the maximum
 
-constexpr float kNominalHzStroke = 448.4f;
+constexpr float kNominalHzStroke = 896.8f;
 constexpr float kNominalHzMax = 7174.4f;
 
 // --- CTRL7: enable sensors (DS-A/DS-09 Table 22) --------------------------
@@ -211,7 +226,7 @@ bool sendCtrl9Command(uint8_t command) {
 }
 
 uint8_t odrSettingFor(Rate rate) {
-  return rate == Rate::Max ? kOdrSetting7174Hz : kOdrSetting448Hz;
+  return rate == Rate::Max ? kOdrSettingMax : kOdrSettingStroke;
 }
 
 // Programs CTRL2 (accel FS+ODR) and CTRL3 (gyro FS+ODR) together -- they
@@ -219,7 +234,7 @@ uint8_t odrSettingFor(Rate rate) {
 bool configureOdr(Rate rate) {
   const uint8_t odr = odrSettingFor(rate);
   const uint8_t ctrl2 = (uint8_t)((kAccelFs16g << 4) | odr);
-  const uint8_t ctrl3 = (uint8_t)((kGyroFsNearest250dps << 4) | odr);
+  const uint8_t ctrl3 = (uint8_t)((kGyroFs256dps << 4) | odr);
   if (!writeVerified(kRegCtrl2, ctrl2)) return false;
   if (!writeVerified(kRegCtrl3, ctrl3)) return false;
   return true;

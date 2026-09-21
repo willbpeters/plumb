@@ -284,7 +284,20 @@ class Pipeline:
             reference = self.g0 / np.linalg.norm(self.g0)
             predicted = quat.rotate(quat.conjugate(self.q), reference)
             error = np.cross(predicted, measured)
-            self.q = quat.integrate(self.q, gain * error / self.dt, self.dt)
+            # The gain is a RATE, in rad/s per unit of error -- not a per-sample
+            # step. Writing `gain * error / self.dt` and then integrating over
+            # dt cancels the dt and makes each sample apply a fixed rotation of
+            # `gain * error`, so the correction actually applied per second
+            # scales with the sample rate. The same constant then means
+            # something different at every ODR, which is the class of silent
+            # error invariant 5 exists to prevent.
+            #
+            # Measured when the stroke rate moved from 500 Hz to 896.8 Hz: worst
+            # face-angle error over 0 to 0.5 dps of gyro noise went from 0.0137
+            # to 0.2358 deg, and the degradation curve stopped being monotonic.
+            # Nothing about the sensor got worse -- the correction simply ran
+            # twice as hard.
+            self.q = quat.integrate(self.q, gain * error, self.dt)
 
         # Face-point velocity from the rigid-body relation (parent spec 7.4).
         # Only path needs the lever arm; face angle and tempo do not, because
