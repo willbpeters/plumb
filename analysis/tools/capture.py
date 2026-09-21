@@ -144,6 +144,14 @@ def main() -> None:
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default="capture.npy")
+    ap.add_argument("--rate", choices=("stroke", "max"), default="stroke",
+                    help="stroke = 896.8 Hz, max = 7174.4 Hz (tap test)")
+    ap.add_argument("--no-start", action="store_true",
+                    help="assume the board is already streaming binary")
+    ap.add_argument("--verbose", action="store_true",
+                    help="per-second diagnostics: raw bytes in, batches decoded, "
+                         "leftover size. Distinguishes a board that stopped "
+                         "sending from a decoder that stopped decoding.")
     args = ap.parse_args()
 
     fs = FullScale()
@@ -154,17 +162,59 @@ def main() -> None:
     leftover = b""
 
     with serial.Serial(args.port, args.baud, timeout=0.1) as port:
-        deadline = time.monotonic() + args.seconds
+        if not args.no_start:
+            # Opening the port toggles DTR/RTS, which resets the ESP32. So the
+            # board is rebooting right now and its setup() holds for 2 s before
+            # it will accept anything. This is also why you cannot start the
+            # stream from the Arduino serial monitor and then run this script:
+            # the reset would stop it again.
+            print(f"# resetting board, waiting for boot...", file=sys.stderr)
+            time.sleep(2.5)
+            port.reset_input_buffer()
+            port.write(b"9" if args.rate == "max" else b"1")
+            time.sleep(0.2)
+            port.write(b"b")        # binary framing
+            time.sleep(0.2)
+            port.write(b"s")        # start streaming
+            time.sleep(0.2)
+            print(f"# streaming at {args.rate} rate, capturing {args.seconds:.0f} s",
+                  file=sys.stderr)
+
+        started = time.monotonic()
+        deadline = started + args.seconds
+        raw_bytes = 0
+        tick = started
+        tick_bytes = 0
+        tick_batches = 0
+
         while time.monotonic() < deadline:
-            leftover += port.read(4096)
+            chunk = port.read(4096)
+            raw_bytes += len(chunk)
+            tick_bytes += len(chunk)
+            leftover += chunk
             batches, leftover = decode_batches(leftover)
+            tick_batches += len(batches)
             for batch in batches:
                 accumulate(stats, batch)
                 rows.extend(batch.samples)
 
+            now = time.monotonic()
+            if args.verbose and now - tick >= 1.0:
+                # Three numbers, and between them they localise the fault:
+                #   bytes/s == 0        -> the BOARD stopped sending
+                #   bytes/s > 0, no batches -> the DECODER is stuck
+                #   leftover growing    -> decoder waiting on a frame that will
+                #                          never complete, i.e. a false sync
+                print(f"  t={now - started:5.1f}s  bytes/s={tick_bytes / (now - tick):8.0f}"
+                      f"  batches={tick_batches:4d}  leftover={len(leftover):6d}"
+                      f"  overflows={stats.overflows}", file=sys.stderr)
+                tick, tick_bytes, tick_batches = now, 0, 0
+
     np.save(args.out, np.array(rows, dtype=np.int16))
 
     odr = stats.measured_odr_hz()
+    print(f"raw bytes : {raw_bytes}  ({12 * stats.samples} accounted for by samples)")
+    print(f"undecoded : {len(leftover)} bytes left in the buffer at the end")
     print(f"samples   : {stats.samples}")
     print(f"batches   : {stats.batches}")
     print(f"dropped   : {stats.dropped}")

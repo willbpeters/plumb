@@ -142,6 +142,17 @@ constexpr uint8_t kFifoWatermarkSamples = 64;
 
 constexpr uint8_t kBytesPerSample = 12;  // ax,ay,az,gx,gy,gz x int16 (DS-A §8.9)
 
+// Largest drain this driver will service in one call, and the staging buffer
+// it needs. 128 is the part's maximum FIFO depth, so a single drain can always
+// empty a full FIFO.
+constexpr uint8_t kMaxDrainSamples = 128;
+
+// Bytes per I2C transaction. The ESP32 Arduino Wire buffer defaults to 128
+// bytes (I2C_BUFFER_LENGTH), so 120 is the largest multiple of 12 that fits
+// without depending on Wire::setBufferSize. That turns a 64-sample drain from
+// 64 transactions into 7.
+constexpr uint8_t kMaxChunkBytes = 120;
+
 // Bound on CTRL9 handshake polling. Each iteration is one 1-byte I2C
 // register read (roughly tens of microseconds at 400 kHz); this bounds
 // drain()'s worst case to a small, fixed amount of time rather than
@@ -309,8 +320,10 @@ DrainResult drain(Sample* out, uint8_t capacity) {
       (uint16_t)(2 * (((status & kFifoStatusCountMsbMask) << 8) | countLsb));
   const uint16_t availableSamples = availableBytes / kBytesPerSample;
 
+  const uint16_t limit =
+      (capacity < kMaxDrainSamples) ? capacity : kMaxDrainSamples;
   const uint8_t samplesToRead =
-      (availableSamples > capacity) ? capacity : (uint8_t)availableSamples;
+      (availableSamples > limit) ? (uint8_t)limit : (uint8_t)availableSamples;
   if (samplesToRead == 0) {
     result.overflow = overflowed;
     return result;
@@ -324,17 +337,40 @@ DrainResult drain(Sample* out, uint8_t capacity) {
     return result;
   }
 
-  for (uint8_t i = 0; i < samplesToRead; i++) {
-    uint8_t buf[kBytesPerSample];
-    if (!burstReadFifoData(buf, kBytesPerSample)) break;
-    out[i].ax = (int16_t)((uint16_t)buf[1] << 8 | buf[0]);
-    out[i].ay = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
-    out[i].az = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
-    out[i].gx = (int16_t)((uint16_t)buf[7] << 8 | buf[6]);
-    out[i].gy = (int16_t)((uint16_t)buf[9] << 8 | buf[8]);
-    out[i].gz = (int16_t)((uint16_t)buf[11] << 8 | buf[10]);
-    result.count++;
+  // Read the whole batch in as few I2C transactions as the Wire buffer allows,
+  // then unpack. This is what parent spec 6.4 means by "FIFO batching is
+  // mandatory"; the previous version issued one complete transaction --
+  // address, register, repeated start, read, stop -- per 12-byte SAMPLE, so a
+  // 64-sample drain cost 64 transactions.
+  //
+  // It matters more than ordinary I2C overhead because the FIFO does not fill
+  // while the part is in read mode (DS-A/DS-09 §8.7/§8.8 -- exiting read mode
+  // is what lets new samples "resume filling"). Every microsecond spent
+  // draining is a microsecond of samples the sensor never stores. Measured
+  // before this change: 652 Hz delivered against 896.8 Hz produced, a 27% loss,
+  // with FIFO_OVFLOW set on 208 of 209 consecutive batches.
+  uint8_t staging[kMaxDrainSamples * kBytesPerSample];
+  const uint16_t wanted = (uint16_t)samplesToRead * kBytesPerSample;
+  uint16_t got = 0;
+  while (got < wanted) {
+    const uint16_t remaining = (uint16_t)(wanted - got);
+    const uint8_t chunk =
+        (uint8_t)(remaining > kMaxChunkBytes ? kMaxChunkBytes : remaining);
+    if (!burstReadFifoData(staging + got, chunk)) break;
+    got = (uint16_t)(got + chunk);
   }
+
+  const uint8_t samplesRead = (uint8_t)(got / kBytesPerSample);
+  for (uint8_t i = 0; i < samplesRead; i++) {
+    const uint8_t* b = staging + (uint16_t)i * kBytesPerSample;
+    out[i].ax = (int16_t)((uint16_t)b[1] << 8 | b[0]);
+    out[i].ay = (int16_t)((uint16_t)b[3] << 8 | b[2]);
+    out[i].az = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+    out[i].gx = (int16_t)((uint16_t)b[7] << 8 | b[6]);
+    out[i].gy = (int16_t)((uint16_t)b[9] << 8 | b[8]);
+    out[i].gz = (int16_t)((uint16_t)b[11] << 8 | b[10]);
+  }
+  result.count = samplesRead;
 
   // Exit FIFO read mode so new samples resume filling the FIFO (§8.7/§8.8
   // step 5). This is a direct register write (clearing bit 7), not a CTRL9
