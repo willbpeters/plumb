@@ -3,3 +3,4 @@ sdkconfig.old
 __pycache__/
 .ipynb_checkpoints/
 *.pyc
+.venv/

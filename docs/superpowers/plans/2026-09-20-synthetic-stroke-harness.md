@@ -68,6 +68,27 @@ Ground truth is the value the caller asked for. This also demonstrates §4.3 con
 
 **Gravity direction at address, in body coordinates**, is `(0, sin(lie), cos(lie))` — not the body Z axis unless `lie` is zero. The pipeline measures this as `g0` and it defines the ground plane.
 
+**The twist and the azimuth are not the same quantity, and that is expected.** The pipeline extracts face angle as the twist of the address-relative attitude about `g0`. The generator's ground truth is the azimuth of the face normal in the ground plane. These agree to third order but not exactly:
+
+| Face angle | twist about `g0` | difference |
+|---|---|---|
+| 2.0° | 1.999919° | −8.1e-5° |
+| 5.0° | 4.998742° | −1.3e-3° |
+
+Verified numerically against `plumb.quat` before Task 3 was written. About 1.3 milli-degrees at 5°, which is why the pipeline tests assert `abs=0.1` rather than machine precision, while the generator's own self-consistency test in Task 3 asserts `abs=1e-6` — the generator is checked against its own definition, the pipeline against a different-but-equivalent one.
+
+Do not try to drive this residual to zero. It is inherent to the two definitions, it is four orders of magnitude below the ±1.0° product target from parent spec §3, and chasing it would mean replacing a decomposition the firmware can compute cheaply with one it cannot.
+
+**The noiseless error budget, measured.** The 0.1° tolerance is not arbitrary and it is not generous. Measured over 45 noiseless strokes spanning face angle, arc type and tempo:
+
+| Source | Cost | Share of 0.1° |
+|---|---|---|
+| Rectangle-rule integration at 500 Hz | 0.0553° | 55% |
+| **Trapezoidal integration at 500 Hz** | **0.0013°** | **1.3%** |
+| Twist-vs-azimuth definition residual | 0.0013° | 1.3% |
+
+Rectangle rule — holding each sample's rate constant across its interval — would spend more than half the budget before any noise, bias or quantization exists. The pipeline therefore integrates trapezoidally (§6 of this plan), which is a one-sample latency rather than lookahead and is implementable on-device. This was measured before the pipeline was written, not discovered afterwards.
+
 ---
 
 ## File Structure
@@ -376,17 +397,27 @@ from plumb import quat
 from plumb.trajectory import ArcType, StrokeParams, generate
 
 
-def test_impact_occurs_where_swing_angle_crosses_zero():
-    t = generate(StrokeParams())
-    assert t.theta[t.impact_index] == pytest.approx(0.0, abs=1e-6)
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
+def test_impact_occurs_exactly_where_swing_angle_crosses_zero(tempo):
+    """Must hold exactly, for every tempo, not just to within a sample.
+
+    The face rotation carries an `arc_gain * theta` term that is designed to
+    vanish at impact. If theta is merely near zero there, that term leaks into
+    ground truth and the leak scales with arc_gain -- which would make recovery
+    look arc-type-dependent and fake a violation of invariant 1."""
+    t = generate(StrokeParams(tempo_ratio=tempo))
+    assert t.theta[t.impact_index] == pytest.approx(0.0, abs=1e-12)
 
 
-def test_tempo_ratio_is_what_was_asked_for():
-    p = StrokeParams(tempo_ratio=2.5)
-    t = generate(p)
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
+def test_achieved_tempo_ratio_is_recorded_and_close_to_requested(tempo):
+    """A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
+    the generator snaps to samples and reports what it actually produced."""
+    t = generate(StrokeParams(tempo_ratio=tempo))
     backswing = t.time[t.transition_index] - t.time[t.address_end_index]
     downswing = t.time[t.impact_index] - t.time[t.transition_index]
-    assert backswing / downswing == pytest.approx(2.5, rel=1e-3)
+    assert backswing / downswing == pytest.approx(t.true_tempo_ratio, rel=1e-12)
+    assert t.true_tempo_ratio == pytest.approx(tempo, rel=5e-3)
 
 
 @pytest.mark.parametrize("arc", list(ArcType))
@@ -429,12 +460,23 @@ def test_face_normal_azimuth_matches_requested_face_angle():
 
 def test_angular_velocity_matches_numerical_differentiation_of_attitude():
     """The analytic omega must agree with differencing the attitude it claims
-    to describe. Catches a sign error in either one."""
+    to describe. This catches a sign error or an axis mix-up in either one.
+
+    Central difference, not forward. A forward difference estimates the AVERAGE
+    rate over [t, t+dt], which differs from the rate AT t by (dt/2)*omega_dot --
+    about 4e-3 rad/s at the phase boundaries where the raised-cosine profile's
+    curvature peaks, which exceeds any tolerance worth asserting here.
+
+    The residual that remains after central differencing is O(|omega|^2 * dt):
+    the difference is expressed in the body frame at i-1 rather than at i. That
+    floors this check at roughly 1e-3 rad/s, which is fine for its purpose -- the
+    errors it exists to catch are sign flips and axis swaps, which show up at
+    order |omega| itself, a thousand times larger."""
     t = generate(StrokeParams())
     dt = t.time[1] - t.time[0]
     for i in range(t.address_end_index + 10, t.impact_index, 37):
-        dq = quat.multiply(quat.conjugate(t.q_true[i]), t.q_true[i + 1])
-        omega_numeric = 2.0 * dq[1:] / dt
+        dq = quat.multiply(quat.conjugate(t.q_true[i - 1]), t.q_true[i + 1])
+        omega_numeric = dq[1:] / dt
         np.testing.assert_allclose(omega_numeric, t.omega_true[i], atol=2e-3)
 
 
@@ -508,6 +550,7 @@ class Trajectory:
     transition_index: int
     impact_index: int
     true_face_angle_deg: float
+    true_tempo_ratio: float
     params: StrokeParams
 
 
@@ -540,12 +583,34 @@ def generate(p: StrokeParams) -> Trajectory:
     # Forward phase sweeps from -amp_back to +amp_fwd on a raised cosine, so
     # theta = 0 falls at a known fraction of that phase. Impact is that crossing.
     u_impact = np.arccos(1.0 - 2.0 * amp_back / (amp_back + amp_fwd)) / np.pi
-    downswing_duration = p.backswing_duration_s / p.tempo_ratio
-    forward_duration = downswing_duration / u_impact
 
-    t_addr_end = p.address_duration_s
-    t_transition = t_addr_end + p.backswing_duration_s
-    t_impact = t_transition + downswing_duration
+    # Phase boundaries snap to whole samples and every duration is derived from
+    # the snapped counts. That is what makes theta exactly zero at impact: at
+    # that sample u equals u_impact exactly, by construction.
+    #
+    # Without snapping, a tempo ratio like 1.5 puts impact at sample 233.33 and
+    # theta is merely near zero there. The `arc_gain * theta` term in the face
+    # rotation then fails to vanish, ground truth drifts by roughly 0.02 deg,
+    # and the drift scales with arc_gain -- which would look exactly like the
+    # putter-type dependence invariant 1 prohibits, while actually being a
+    # sampling artifact of the generator.
+    #
+    # A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
+    # the achieved ratio is recorded rather than the requested one.
+    n_addr = int(round(p.address_duration_s / dt))
+    n_back = int(round(p.backswing_duration_s / dt))
+    n_down = int(round(p.backswing_duration_s / p.tempo_ratio / dt))
+
+    backswing_duration = n_back * dt
+    forward_duration = (n_down * dt) / u_impact
+
+    address_end_index = n_addr
+    transition_index = n_addr + n_back
+    impact_index = transition_index + n_down
+
+    t_addr_end = address_end_index * dt
+    t_transition = transition_index * dt
+    t_impact = impact_index * dt
     t_end = t_transition + forward_duration + p.followthrough_hold_s
 
     n = int(round(t_end / dt)) + 1
@@ -556,16 +621,14 @@ def generate(p: StrokeParams) -> Trajectory:
     theta_dot = np.zeros(n)
 
     back = (time >= t_addr_end) & (time < t_transition)
-    u = (time[back] - t_addr_end) / p.backswing_duration_s
+    u = (time[back] - t_addr_end) / backswing_duration
     theta[back] = -amp_back * _smoothstep(u)
-    theta_dot[back] = -amp_back * _smoothstep_derivative(u, p.backswing_duration_s)
+    theta_dot[back] = -amp_back * _smoothstep_derivative(u, backswing_duration)
 
     fwd = time >= t_transition
     u = np.clip((time[fwd] - t_transition) / forward_duration, 0.0, 1.0)
     theta[fwd] = -amp_back + (amp_back + amp_fwd) * _smoothstep(u)
     theta_dot[fwd] = (amp_back + amp_fwd) * _smoothstep_derivative(u, forward_duration)
-
-    impact_index = int(np.argmin(np.abs(theta[time >= t_transition]))) + int(np.searchsorted(time, t_transition))
 
     # --- face rotation phi(t) and its derivative -------------------------
     # Two independent contributions:
@@ -598,10 +661,11 @@ def generate(p: StrokeParams) -> Trajectory:
         phi=phi,
         q_true=q_true,
         omega_true=omega_true,
-        address_end_index=int(round(t_addr_end / dt)),
-        transition_index=int(round(t_transition / dt)),
+        address_end_index=address_end_index,
+        transition_index=transition_index,
         impact_index=impact_index,
         true_face_angle_deg=p.face_angle_at_impact_deg,
+        true_tempo_ratio=n_back / n_down,
         params=p,
     )
 ```
@@ -609,7 +673,7 @@ def generate(p: StrokeParams) -> Trajectory:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd analysis && uv run pytest tests/test_trajectory.py -v`
-Expected: 9 passed (the arc-type test is parametrized three ways)
+Expected: 15 passed (two tests parametrized four ways over tempo, one three ways over arc type, four unparametrized)
 
 - [ ] **Step 5: Commit**
 
@@ -667,10 +731,17 @@ def test_accelerometer_at_address_reads_gravity_tilted_by_lie_angle():
 
 
 def test_impact_impulse_saturates_and_that_is_acceptable():
+    """Clipping at impact is expected, not a defect: impact is a trigger, not a
+    measurement (parent spec 6.4). A 60 g impulse against a 16 g full scale
+    cannot do anything else.
+
+    Cast to int32 before taking magnitudes. abs() of int16 -32768 overflows
+    back to -32768, so a saturation check done in int16 silently reads the
+    wrong value at exactly the rail it is trying to detect."""
     traj = generate(StrokeParams())
     s = simulate(traj, SensorParams(), seed=1)
-    peak = np.abs(s.accel_counts[traj.impact_index - 2:traj.impact_index + 6]).max()
-    assert peak == 32767
+    window = s.accel_counts[traj.impact_index - 2:traj.impact_index + 6].astype(np.int32)
+    assert np.abs(window).max() >= 32767
 
 
 def test_same_seed_gives_identical_output():
@@ -772,6 +843,12 @@ def simulate(traj: Trajectory, p: SensorParams, seed: int,
     # --- accelerometer ----------------------------------------------------
     # Specific force at the sensor: rigid-body acceleration about the pivot,
     # minus gravity, expressed in the body frame.
+    #
+    # `d` runs FROM the pivot TO the sensor, which is the direction the
+    # parent spec's formula assumes. Body Z points head-to-butt, and the pivot
+    # (hands and sternum) sits above the grip butt, so d is negative Z.
+    # Sanity check: for a pendulum this makes omega x (omega x d) point from
+    # the sensor back toward the pivot, which is centripetal, as it must be.
     d = np.array([0.0, 0.0, -traj.params.pivot_offset_m])
     omega_dot = np.gradient(traj.omega_true, dt, axis=0)
     a_body = np.cross(omega_dot, d) + np.cross(traj.omega_true, np.cross(traj.omega_true, d))
@@ -862,12 +939,13 @@ def test_gyro_bias_is_nulled_at_address():
     np.testing.assert_allclose(np.degrees(pipe.bias), [1.5, 1.5, 1.5], atol=0.1)
 
 
-def test_state_machine_visits_every_state_in_order():
+def test_backswing_is_detected():
     _, pipe, _ = run_stroke(StrokeParams())
-    order = [State.IDLE, State.ADDRESS, State.BACKSWING, State.DOWNSWING,
-             State.IMPACT, State.FOLLOWTHROUGH, State.DONE]
-    assert pipe.visited == order
+    assert pipe.state is State.BACKSWING
+    assert pipe.visited == [State.IDLE, State.ADDRESS, State.BACKSWING]
 ```
+
+Note: the full state-machine walk is asserted in Task 6, once the remaining states exist. Every task in this plan leaves the suite green — a red suite at a commit boundary makes it impossible to tell a known-incomplete feature from a regression.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -922,6 +1000,7 @@ class Thresholds:
 
     stillness_window_s: float = 0.50
     stillness_gyro_std_rad: float = np.radians(0.8)
+    onset_gyro_rad: float = np.radians(1.0)
     backswing_gyro_rad: float = np.radians(8.0)
     backswing_hold_s: float = 0.04
     transition_gyro_rad: float = np.radians(2.0)
@@ -953,18 +1032,27 @@ class Pipeline:
         self.n = 0
 
         self._still: list[np.ndarray] = []
-        self._accel_sum = np.zeros(3)
+        self._still_accel: list[np.ndarray] = []
         self.address_captured = False
         self.bias = np.zeros(3)
         self.g0 = np.zeros(3)
 
         self.q = quat.identity()          # attitude relative to address
+        self._prev_omega = None           # previous bias-corrected rate, for trapezoidal integration
         self.q_impact = None
         self.i_backswing_start = None
         self.i_transition = None
         self.i_impact = None
         self._hold = 0
         self._omega_history: list[np.ndarray] = []
+
+        # Back-tracking state. Detecting a stroke boundary always lags the
+        # boundary itself; these record where it actually was. Past data only.
+        self._last_quiet_n = 0
+        self._last_same_sign_n = None
+        self._backswing_axis = None
+        self._backswing_sign = None
+        self._impact_window: list[tuple[int, np.ndarray]] = []
 
     # -- conversion ------------------------------------------------------
     def _to_rad_s(self, counts: np.ndarray) -> np.ndarray:
@@ -991,35 +1079,66 @@ class Pipeline:
         return None
 
     def _step_idle(self, omega, accel) -> None:
+        """Wait for stillness, then capture both references at once.
+
+        Parent spec 7.1: entering ADDRESS captures the gravity vector g0 and the
+        gyro bias, both as means over the SAME stillness window. Averaging
+        gravity over a longer span than the stillness test covers would mean
+        averaging over motion the stillness test never vetted.
+        """
         window = int(self.th.stillness_window_s / self.dt)
         self._still.append(omega)
-        self._accel_sum += accel
+        self._still_accel.append(accel)
         if len(self._still) < window:
             return
         self._still = self._still[-window:]
+        self._still_accel = self._still_accel[-window:]
+
         recent = np.array(self._still)
         if np.all(recent.std(axis=0) < self.th.stillness_gyro_std_rad):
             self.bias = recent.mean(axis=0)
-            self.g0 = self._accel_sum / self.n
+            self.g0 = np.array(self._still_accel).mean(axis=0)
             self.address_captured = True
             self.q = quat.identity()
             self._enter(State.ADDRESS)
 
     def _step_address(self, omega) -> None:
+        """Detect the backswing, and record where it actually started.
+
+        Confirming a backswing needs a threshold crossing plus a hold, and both
+        are late -- the rate has to climb from zero to 8 deg/s and then persist
+        for 40 ms. The stroke began earlier, when the rate first left zero.
+
+        That latency does not cancel in the tempo ratio, because impact is
+        detected within one sample while backswing start is ~54 samples late.
+        Measured on the noiseless generator, taking the confirmation instant as
+        the start gives a worst tempo error of 0.351 against the 0.05 target in
+        parent spec section 3 -- seven times over, systematically biased low,
+        and worsening as tempo ratio rises. Back-tracking to the last quiet
+        sample brings it to 0.034.
+
+        `_last_quiet_n` reads only past samples, so this is a ring buffer rather
+        than lookahead and remains implementable on-device.
+        """
         corrected = omega - self.bias
-        if np.linalg.norm(corrected) > self.th.backswing_gyro_rad:
+        magnitude = np.linalg.norm(corrected)
+
+        if magnitude < self.th.onset_gyro_rad:
+            self._last_quiet_n = self.n
+
+        if magnitude > self.th.backswing_gyro_rad:
             self._hold += 1
             if self._hold * self.dt >= self.th.backswing_hold_s:
-                self.i_backswing_start = self.n
+                self.i_backswing_start = self._last_quiet_n
                 self._enter(State.BACKSWING)
         else:
             self._hold = 0
 ```
 
-- [ ] **Step 4: Run tests — two pass, one fails**
+- [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd analysis && uv run pytest tests/test_pipeline.py -v`
-Expected: `test_reaches_address_and_captures_gravity` PASS, `test_gyro_bias_is_nulled_at_address` PASS, `test_state_machine_visits_every_state_in_order` FAIL (only reaches BACKSWING). That failure is the next task's entry point.
+Run: `cd analysis && uv run pytest -v`
+Expected: 34 passed (31 existing plus 3 new)
 
 - [ ] **Step 5: Commit**
 
@@ -1041,12 +1160,50 @@ git commit -m "Add pipeline address detection and per-stroke gyro bias nulling"
 ```python
 # append to analysis/tests/test_pipeline.py
 
+def test_state_machine_visits_every_state_in_order():
+    _, pipe, _ = run_stroke(StrokeParams())
+    order = [State.IDLE, State.ADDRESS, State.BACKSWING, State.DOWNSWING,
+             State.IMPACT, State.FOLLOWTHROUGH, State.DONE]
+    assert pipe.visited == order
+
+
 @pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
 def test_tempo_ratio_recovered(tempo):
-    _, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
+    """Compared against the ratio the generator actually produced, not the one
+    requested -- the 500 Hz grid cannot hit an arbitrary ratio exactly, and
+    holding the pipeline to a target the stroke never contained would be
+    measuring the generator's rounding, not the pipeline."""
+    traj, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
     assert result is not None
-    assert result.tempo_ratio == pytest.approx(tempo, abs=0.05)
+    assert result.tempo_ratio == pytest.approx(traj.true_tempo_ratio, abs=0.05)
 ```
+
+The 0.05 tolerance is the parent spec §3 product target, not a number chosen to pass. Measured worst case with back-tracked boundaries is 0.034 noiseless.
+
+**Known limit, to be recorded rather than engineered around here.** Tempo accuracy depends on resolving when the rate left zero, so it degrades as gyro noise rises toward the onset gate:
+
+| Gyro noise | Worst tempo error |
+|---|---|
+| 0.0 dps | 0.034 |
+| 0.2 dps | 0.017 |
+| 0.5 dps | 0.009 |
+| 1.0 dps | 0.053 |
+| 2.0 dps | 0.178 |
+
+The QMI8658's noise density puts datasheet-typical near 0.16 dps at this bandwidth, comfortably inside the target. The 1.0 dps onset gate is a placeholder like every other threshold (invariant 5) and gets derived from the real corpus in Phase 2, where deriving it from the measured stillness variance is the obvious candidate.
+
+**Margin is thin at high tempo ratios, and that is recorded rather than tuned away.** With the half-sample transition correction and the onset gate at its placeholder 1.0 dps:
+
+| Tempo | Error |
+|---|---|
+| 1.5:1 | −0.018 |
+| 2.0:1 | −0.026 |
+| 2.5:1 | −0.034 |
+| 3.0:1 | −0.043 |
+
+Worst case 0.043 against a 0.05 target — 15% margin, and the error grows monotonically with tempo ratio because a faster downswing makes each sample a larger fraction of it. Dropping the onset gate to 0.25 dps would take the worst case to 0.017, and that is deliberately NOT done: tuning a threshold until a test passes is what invariant 5 exists to prevent, and the gate has to survive real gyro noise that this sweep does not yet contain.
+
+Face angle, the metric this harness exists to prove, has roughly a thousand times more margin. Tempo is the tighter constraint and the one Phase 2 should look at first.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1068,10 +1225,31 @@ Add to `Pipeline`, and extend the `step()` dispatch to call them:
         is meant to measure. Drift is bounded instead by the short integration
         window and the bias null at address.
         """
+        # FOLLOWTHROUGH counts as in-stroke. The putter is still moving fast
+        # there, so the accelerometer is still reading gravity plus stroke
+        # acceleration. Parent spec 7.2 restores the gain in IDLE and ADDRESS
+        # only -- those are the two states where the device is actually still.
         in_stroke = self.state in (State.BACKSWING, State.DOWNSWING,
-                                   State.IMPACT)
+                                   State.IMPACT, State.FOLLOWTHROUGH)
         gain = self.th.accel_gain_stroke if in_stroke else self.th.accel_gain_static
-        self.q = quat.integrate(self.q, omega - self.bias, self.dt)
+
+        # Trapezoidal, not rectangle: average the rate across the interval being
+        # integrated. That requires the sample at the END of the interval, which
+        # is one sample of LATENCY, not lookahead -- the firmware integrates the
+        # interval [i-1, i] when sample i arrives, and already has that sample in
+        # hand. It costs one stored vector.
+        #
+        # Measured on the noiseless generator, worst case over 45 strokes:
+        #   rectangle rule    0.0553 deg of face angle  (55% of the 0.1 deg budget)
+        #   trapezoidal rule  0.0013 deg                 (1.3%)
+        # a 41x improvement for one add and one multiply. Rectangle rule would
+        # spend half the noiseless budget on nothing before noise even appears.
+        corrected = omega - self.bias
+        if self._prev_omega is None:
+            self._prev_omega = corrected
+        rate = 0.5 * (corrected + self._prev_omega)
+        self._prev_omega = corrected
+        self.q = quat.integrate(self.q, rate, self.dt)
 
         if gain > 0.0 and np.linalg.norm(accel) > 0.0:
             measured = accel / np.linalg.norm(accel)
@@ -1085,23 +1263,81 @@ Add to `Pipeline`, and extend the `step()` dispatch to call them:
         return int(np.argmax(np.abs(recent).mean(axis=0)))
 
     def _step_backswing(self, omega, accel) -> None:
+        """Detect the transition, and record where the direction actually flipped.
+
+        The dominant axis and its backswing sign are frozen on entry rather than
+        recomputed per sample, so a late-stroke wobble cannot silently reinterpret
+        which axis the stroke is about.
+
+        The magnitude gate only CONFIRMS a reversal, guarding against sign
+        chatter while the rate passes through zero. The instant recorded is the
+        last sample still carrying the backswing's sign, so the confirmation
+        delay does not bias the tempo ratio -- same reasoning as the backswing
+        onset above.
+
+        Note what is NOT here: nothing keys off how far the face rotated.
+        Segmentation is timing, direction and acceleration only (invariant 1).
+        """
         corrected = omega - self.bias
         self._omega_history.append(corrected)
-        axis = self._dominant_axis()
-        # Transition is a sign reversal on the dominant axis: a timing and
-        # direction test, never a magnitude test (invariant 1).
-        if (np.sign(corrected[axis]) != np.sign(self._omega_history[0][axis])
-                and abs(corrected[axis]) > self.th.transition_gyro_rad):
-            self.i_transition = self.n
+
+        if self._backswing_axis is None:
+            self._backswing_axis = self._dominant_axis()
+            self._backswing_sign = np.sign(corrected[self._backswing_axis])
+            self._last_same_sign_n = self.n
+            return
+
+        axis = self._backswing_axis
+        if np.sign(corrected[axis]) == self._backswing_sign:
+            self._last_same_sign_n = self.n
+        elif abs(corrected[axis]) > self.th.transition_gyro_rad:
+            # The rate crossed zero somewhere BETWEEN the last same-sign sample
+            # and the next one, so the last same-sign sample is the near edge of
+            # the bracket, not the crossing. Taking it directly biases the
+            # transition half a sample early and, because backswing and
+            # downswing sit on opposite sides of it, that half sample is
+            # subtracted from one and added to the other -- it enters the tempo
+            # ratio twice, with the same sign.
+            self.i_transition = self._last_same_sign_n + 0.5
             self._enter(State.DOWNSWING)
 
     def _step_downswing(self, omega, accel) -> None:
         if np.linalg.norm(accel) > self.th.impact_accel_mps2:
-            self.i_impact = self.n
-            self.q_impact = self.q.copy()
+            self._impact_window = [(self.n, self.q.copy())]
             self._enter(State.IMPACT)
 
     def _step_impact(self, omega, accel) -> None:
+        """Take the impact instant as the MIDDLE of the acceleration spike.
+
+        The threshold fires on the spike's rising edge, one or more samples
+        before the strike. Sampling attitude there includes residual pre-impact
+        rotation, and because that leak couples through the shaft axis it scales
+        with how fast the face was rotating -- measured as 0.037 deg of error for
+        a straight stroke against 0.072 deg for an arced one. Accuracy that
+        tracks arc type is a putter-type prior (invariant 1), even at that size,
+        and it would grow on faster real strokes.
+
+        The peak cannot be used: the spike saturates (parent spec 6.4, and a
+        60 g impulse against a 16 g full scale can do nothing else), so several
+        samples read the same clipped value and the peak carries no information.
+
+        The midpoint of the above-threshold run is threshold-insensitive,
+        saturation-robust, and unbiased for a symmetric impulse. Measured worst
+        error falls from 0.0733 deg to 0.0012 deg, and the arc-type spread from
+        0.0356 deg to 0.0004 deg.
+
+        Cost is a few samples of latency against a 500 ms budget, and a short
+        buffer of attitudes -- past data only.
+
+        Phase 2 note: a real strike may not be symmetric, since the putter
+        decelerates and then the ball departs. Whether the midpoint stays
+        unbiased on real impulses is a question for the logged corpus, like
+        every threshold here.
+        """
+        if np.linalg.norm(accel) > self.th.impact_accel_mps2:
+            self._impact_window.append((self.n, self.q.copy()))
+            return
+        self.i_impact, self.q_impact = self._impact_window[len(self._impact_window) // 2]
         self._enter(State.FOLLOWTHROUGH)
 
     def _step_followthrough(self, omega, accel):
@@ -1201,12 +1437,40 @@ def test_face_angle_recovered_for_every_arc_type(arc):
     assert result.face_angle_deg == pytest.approx(2.0, abs=0.1)
 
 
-def test_face_angle_is_relative_to_address_not_absolute():
-    """Invariant 3. Rotating the whole stroke in heading must not change the
-    reported face angle."""
+def test_recovery_quality_does_not_depend_on_arc_type():
+    """Invariant 1, stated quantitatively rather than as a tolerance.
+
+    It is not enough that every arc type lands inside tolerance. The ERROR
+    itself must not track arc gain -- if it does, the algorithm contains a
+    putter-type prior that a loose tolerance is merely hiding, and it will grow
+    on real strokes that rotate faster than these.
+
+    This test is the reason the impact instant is taken at the middle of the
+    acceleration spike rather than at its leading edge. With the leading edge
+    the spread is 0.0356 deg; with the midpoint it is 0.0004 deg."""
+    errors = {}
+    for arc in ArcType:
+        _, _, result = run_stroke(
+            StrokeParams(face_angle_at_impact_deg=2.0, arc_type=arc))
+        errors[arc.name] = result.face_angle_deg - 2.0
+    spread = max(errors.values()) - min(errors.values())
+    assert spread < 0.005, f"recovery error varies with arc type: {errors}"
+
+
+def test_face_angle_does_not_depend_on_stroke_size():
+    """A longer backswing delivering the same face angle must report the same
+    number. Face angle is an attitude difference between two instants, so
+    nothing about the size of the motion between them should enter it.
+
+    This is also a weak check on invariant 3: attitude is integrated from
+    identity at address, so the reported angle is address-relative by
+    construction and no absolute heading can leak in. There is no heading
+    parameter in the generator to vary, because the device has no heading
+    reference to be wrong about."""
     a = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0))[2]
     b = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0,
-                                backswing_amplitude_deg=15.0))[2]
+                                backswing_amplitude_deg=15.0,
+                                followthrough_amplitude_deg=15.0))[2]
     assert a.face_angle_deg == pytest.approx(b.face_angle_deg, abs=0.1)
 ```
 
@@ -1272,10 +1536,44 @@ def test_path_direction_classified():
     assert result.path_arc_m > 0.0
 
 
-def test_straight_stroke_classified_straight():
-    _, _, result = run_stroke(StrokeParams(arc_type=ArcType.STRAIGHT))
+def test_vertical_shaft_traces_a_straight_path():
+    """The arc comes from the swing axis being tilted by the lie angle, so the
+    head travels on a cone whose ground-plane projection curves. Remove the
+    tilt and the cone degenerates to a plane: the path must go straight.
+
+    This is the test that proves the arc is real geometry rather than
+    accumulated integration error, because error would not vanish here."""
+    _, _, result = run_stroke(StrokeParams(lie_angle_deg=0.0))
+    assert result.path_arc_m < 1e-4
     assert result.path_direction == "straight"
+
+
+@pytest.mark.parametrize("lie,expected_mm", [(5.0, 3.6), (10.0, 7.3), (20.0, 14.3)])
+def test_path_arc_grows_with_lie_angle(lie, expected_mm):
+    """A flatter lie swings the head on a more tilted cone and arcs more. The
+    expected values are measured, and they are close to linear in the lie angle
+    over this range, which is what the small-angle geometry predicts."""
+    _, _, result = run_stroke(StrokeParams(lie_angle_deg=lie))
+    assert result.path_arc_m * 1000 == pytest.approx(expected_mm, abs=0.2)
+
+
+def test_path_arc_does_not_depend_on_putter_type():
+    """Invariant 1, applied to path.
+
+    Path is swing geometry, not putter geometry. A zero-torque putter and a
+    blade swung on the same plane trace the same path and differ only in how
+    the face rotates along it. If arc magnitude tracked arc gain, the pipeline
+    would be reading face rotation into a metric that has nothing to do with
+    it."""
+    arcs = {}
+    for arc in ArcType:
+        _, _, result = run_stroke(StrokeParams(arc_type=arc))
+        arcs[arc.name] = result.path_arc_m
+    spread = max(arcs.values()) - min(arcs.values())
+    assert spread < 1e-5, f"path arc varies with putter type: {arcs}"
 ```
+
+**Correction to the original plan.** The first draft asserted that a `STRAIGHT` arc type produces a straight path. That conflated two independent things: `ArcType` controls how much the FACE rotates, while the PATH arc comes from the swing axis being tilted by the lie angle. In real golf they correlate, because an arced stroke swings on a tilted plane and the face follows it — but they are separate parameters in this generator, and the measured arc is identical across all three arc types to three decimal places. The replacement tests check what the geometry actually predicts.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1304,7 +1602,7 @@ Initialise `self._face_track: list[np.ndarray] = []` in `__init__`, record `self
         after = lateral[self._impact_track_index :]
         arc = float(np.ptp(lateral)) if len(lateral) else 0.0
         delta = (after.mean() if len(after) else 0.0) - (before.mean() if len(before) else 0.0)
-        if arc < 0.003:
+        if arc < self.th.path_straight_arc_m:
             direction = "straight"
         else:
             direction = "in-to-out" if delta > 0 else "out-to-in"
@@ -1312,10 +1610,16 @@ Initialise `self._face_track: list[np.ndarray] = []` in `__init__`, record `self
 
 and return `path_arc_m=arc, path_direction=direction`.
 
+Add the cutoff to `Thresholds` rather than writing it inline — invariant 5 applies to path thresholds exactly as it does to detection thresholds, and "3 mm" is a guess until a real corpus says otherwise:
+
+```python
+    path_straight_arc_m: float = 0.003
+```
+
 - [ ] **Step 4: Run tests**
 
 Run: `cd analysis && uv run pytest -v`
-Expected: all pass. If the straight case lands just above the 3 mm threshold, adjust the threshold in `Thresholds` rather than hardcoding it here — invariant 5 applies to path thresholds too.
+Expected: 52 passed. Do NOT adjust `path_straight_arc_m` to make a test pass. If the straight case misclassifies, report the measured arc magnitude — the classifier or the track accumulation is wrong, and moving the cutoff would only hide it.
 
 - [ ] **Step 5: Commit**
 
