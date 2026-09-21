@@ -731,10 +731,17 @@ def test_accelerometer_at_address_reads_gravity_tilted_by_lie_angle():
 
 
 def test_impact_impulse_saturates_and_that_is_acceptable():
+    """Clipping at impact is expected, not a defect: impact is a trigger, not a
+    measurement (parent spec 6.4). A 60 g impulse against a 16 g full scale
+    cannot do anything else.
+
+    Cast to int32 before taking magnitudes. abs() of int16 -32768 overflows
+    back to -32768, so a saturation check done in int16 silently reads the
+    wrong value at exactly the rail it is trying to detect."""
     traj = generate(StrokeParams())
     s = simulate(traj, SensorParams(), seed=1)
-    peak = np.abs(s.accel_counts[traj.impact_index - 2:traj.impact_index + 6]).max()
-    assert peak == 32767
+    window = s.accel_counts[traj.impact_index - 2:traj.impact_index + 6].astype(np.int32)
+    assert np.abs(window).max() >= 32767
 
 
 def test_same_seed_gives_identical_output():
@@ -836,6 +843,12 @@ def simulate(traj: Trajectory, p: SensorParams, seed: int,
     # --- accelerometer ----------------------------------------------------
     # Specific force at the sensor: rigid-body acceleration about the pivot,
     # minus gravity, expressed in the body frame.
+    #
+    # `d` runs FROM the pivot TO the sensor, which is the direction the
+    # parent spec's formula assumes. Body Z points head-to-butt, and the pivot
+    # (hands and sternum) sits above the grip butt, so d is negative Z.
+    # Sanity check: for a pendulum this makes omega x (omega x d) point from
+    # the sensor back toward the pivot, which is centripetal, as it must be.
     d = np.array([0.0, 0.0, -traj.params.pivot_offset_m])
     omega_dot = np.gradient(traj.omega_true, dt, axis=0)
     a_body = np.cross(omega_dot, d) + np.cross(traj.omega_true, np.cross(traj.omega_true, d))
