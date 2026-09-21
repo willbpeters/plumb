@@ -387,17 +387,27 @@ from plumb import quat
 from plumb.trajectory import ArcType, StrokeParams, generate
 
 
-def test_impact_occurs_where_swing_angle_crosses_zero():
-    t = generate(StrokeParams())
-    assert t.theta[t.impact_index] == pytest.approx(0.0, abs=1e-6)
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
+def test_impact_occurs_exactly_where_swing_angle_crosses_zero(tempo):
+    """Must hold exactly, for every tempo, not just to within a sample.
+
+    The face rotation carries an `arc_gain * theta` term that is designed to
+    vanish at impact. If theta is merely near zero there, that term leaks into
+    ground truth and the leak scales with arc_gain -- which would make recovery
+    look arc-type-dependent and fake a violation of invariant 1."""
+    t = generate(StrokeParams(tempo_ratio=tempo))
+    assert t.theta[t.impact_index] == pytest.approx(0.0, abs=1e-12)
 
 
-def test_tempo_ratio_is_what_was_asked_for():
-    p = StrokeParams(tempo_ratio=2.5)
-    t = generate(p)
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
+def test_achieved_tempo_ratio_is_recorded_and_close_to_requested(tempo):
+    """A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
+    the generator snaps to samples and reports what it actually produced."""
+    t = generate(StrokeParams(tempo_ratio=tempo))
     backswing = t.time[t.transition_index] - t.time[t.address_end_index]
     downswing = t.time[t.impact_index] - t.time[t.transition_index]
-    assert backswing / downswing == pytest.approx(2.5, rel=1e-3)
+    assert backswing / downswing == pytest.approx(t.true_tempo_ratio, rel=1e-12)
+    assert t.true_tempo_ratio == pytest.approx(tempo, rel=5e-3)
 
 
 @pytest.mark.parametrize("arc", list(ArcType))
@@ -519,6 +529,7 @@ class Trajectory:
     transition_index: int
     impact_index: int
     true_face_angle_deg: float
+    true_tempo_ratio: float
     params: StrokeParams
 
 
@@ -551,12 +562,34 @@ def generate(p: StrokeParams) -> Trajectory:
     # Forward phase sweeps from -amp_back to +amp_fwd on a raised cosine, so
     # theta = 0 falls at a known fraction of that phase. Impact is that crossing.
     u_impact = np.arccos(1.0 - 2.0 * amp_back / (amp_back + amp_fwd)) / np.pi
-    downswing_duration = p.backswing_duration_s / p.tempo_ratio
-    forward_duration = downswing_duration / u_impact
 
-    t_addr_end = p.address_duration_s
-    t_transition = t_addr_end + p.backswing_duration_s
-    t_impact = t_transition + downswing_duration
+    # Phase boundaries snap to whole samples and every duration is derived from
+    # the snapped counts. That is what makes theta exactly zero at impact: at
+    # that sample u equals u_impact exactly, by construction.
+    #
+    # Without snapping, a tempo ratio like 1.5 puts impact at sample 233.33 and
+    # theta is merely near zero there. The `arc_gain * theta` term in the face
+    # rotation then fails to vanish, ground truth drifts by roughly 0.02 deg,
+    # and the drift scales with arc_gain -- which would look exactly like the
+    # putter-type dependence invariant 1 prohibits, while actually being a
+    # sampling artifact of the generator.
+    #
+    # A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
+    # the achieved ratio is recorded rather than the requested one.
+    n_addr = int(round(p.address_duration_s / dt))
+    n_back = int(round(p.backswing_duration_s / dt))
+    n_down = int(round(p.backswing_duration_s / p.tempo_ratio / dt))
+
+    backswing_duration = n_back * dt
+    forward_duration = (n_down * dt) / u_impact
+
+    address_end_index = n_addr
+    transition_index = n_addr + n_back
+    impact_index = transition_index + n_down
+
+    t_addr_end = address_end_index * dt
+    t_transition = transition_index * dt
+    t_impact = impact_index * dt
     t_end = t_transition + forward_duration + p.followthrough_hold_s
 
     n = int(round(t_end / dt)) + 1
@@ -567,16 +600,14 @@ def generate(p: StrokeParams) -> Trajectory:
     theta_dot = np.zeros(n)
 
     back = (time >= t_addr_end) & (time < t_transition)
-    u = (time[back] - t_addr_end) / p.backswing_duration_s
+    u = (time[back] - t_addr_end) / backswing_duration
     theta[back] = -amp_back * _smoothstep(u)
-    theta_dot[back] = -amp_back * _smoothstep_derivative(u, p.backswing_duration_s)
+    theta_dot[back] = -amp_back * _smoothstep_derivative(u, backswing_duration)
 
     fwd = time >= t_transition
     u = np.clip((time[fwd] - t_transition) / forward_duration, 0.0, 1.0)
     theta[fwd] = -amp_back + (amp_back + amp_fwd) * _smoothstep(u)
     theta_dot[fwd] = (amp_back + amp_fwd) * _smoothstep_derivative(u, forward_duration)
-
-    impact_index = int(np.argmin(np.abs(theta[time >= t_transition]))) + int(np.searchsorted(time, t_transition))
 
     # --- face rotation phi(t) and its derivative -------------------------
     # Two independent contributions:
@@ -609,10 +640,11 @@ def generate(p: StrokeParams) -> Trajectory:
         phi=phi,
         q_true=q_true,
         omega_true=omega_true,
-        address_end_index=int(round(t_addr_end / dt)),
-        transition_index=int(round(t_transition / dt)),
+        address_end_index=address_end_index,
+        transition_index=transition_index,
         impact_index=impact_index,
         true_face_angle_deg=p.face_angle_at_impact_deg,
+        true_tempo_ratio=n_back / n_down,
         params=p,
     )
 ```
@@ -620,7 +652,7 @@ def generate(p: StrokeParams) -> Trajectory:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd analysis && uv run pytest tests/test_trajectory.py -v`
-Expected: 9 passed (the arc-type test is parametrized three ways)
+Expected: 15 passed (two tests parametrized four ways over tempo, one three ways over arc type, four unparametrized)
 
 - [ ] **Step 5: Commit**
 
@@ -1054,9 +1086,13 @@ git commit -m "Add pipeline address detection and per-stroke gyro bias nulling"
 
 @pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
 def test_tempo_ratio_recovered(tempo):
-    _, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
+    """Compared against the ratio the generator actually produced, not the one
+    requested -- the 500 Hz grid cannot hit an arbitrary ratio exactly, and
+    holding the pipeline to a target the stroke never contained would be
+    measuring the generator's rounding, not the pipeline."""
+    traj, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
     assert result is not None
-    assert result.tempo_ratio == pytest.approx(tempo, abs=0.05)
+    assert result.tempo_ratio == pytest.approx(traj.true_tempo_ratio, abs=0.05)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
