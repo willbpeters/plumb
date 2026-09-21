@@ -58,3 +58,39 @@ def test_tempo_ratio_recovered(tempo):
     traj, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
     assert result is not None
     assert result.tempo_ratio == pytest.approx(traj.true_tempo_ratio, abs=0.05)
+
+
+@pytest.mark.parametrize("face_angle", [-5.0, -2.0, 0.0, 1.0, 2.0, 5.0])
+def test_face_angle_recovered_noiselessly(face_angle):
+    """At zero noise and zero bias the pipeline is a pure algebraic inverse of
+    the forward model. Any error here is a sign error, a frame mix-up or a
+    quaternion convention mismatch."""
+    _, _, result = run_stroke(StrokeParams(face_angle_at_impact_deg=face_angle))
+    assert result is not None
+    assert result.face_angle_deg == pytest.approx(face_angle, abs=0.1)
+
+
+@pytest.mark.parametrize("arc", list(ArcType))
+def test_face_angle_recovered_for_every_arc_type(arc):
+    """Invariant 1. A zero-torque putter produces very little face rotation and
+    must recover exactly as well as an arced one."""
+    _, _, result = run_stroke(
+        StrokeParams(face_angle_at_impact_deg=2.0, arc_type=arc))
+    assert result.face_angle_deg == pytest.approx(2.0, abs=0.1)
+
+
+def test_face_angle_does_not_depend_on_stroke_size():
+    """A longer backswing delivering the same face angle must report the same
+    number. Face angle is an attitude difference between two instants, so
+    nothing about the size of the motion between them should enter it.
+
+    This is also a weak check on invariant 3: attitude is integrated from
+    identity at address, so the reported angle is address-relative by
+    construction and no absolute heading can leak in. There is no heading
+    parameter in the generator to vary, because the device has no heading
+    reference to be wrong about."""
+    a = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0))[2]
+    b = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0,
+                                backswing_amplitude_deg=15.0,
+                                followthrough_amplitude_deg=15.0))[2]
+    assert a.face_angle_deg == pytest.approx(b.face_angle_deg, abs=0.1)

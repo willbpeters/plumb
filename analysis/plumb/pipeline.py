@@ -287,11 +287,25 @@ class Pipeline:
             self._hold = 0
         return None
 
+    def _face_angle_at_impact(self) -> float:
+        """Rotation about measured gravity between address and impact.
+
+        Attitude is integrated from identity at address, so `q_impact` is
+        already the address-relative rotation (invariant 3 -- there is no
+        external heading reference and none is implied here).
+
+        Taking the twist about g0 rather than reading a body axis is what makes
+        this correct for a tilted shaft: g0 is (0, sin lie, cos lie) in body
+        coordinates, not the body Z axis, so shaft lie angle is handled by
+        measurement rather than by a stored constant (parent spec 7.3).
+        """
+        return quat.twist_angle(self.q_impact, self.g0)
+
     def _compute(self) -> StrokeResult:
         backswing = (self.i_transition - self.i_backswing_start) * self.dt
         downswing = (self.i_impact - self.i_transition) * self.dt
         return StrokeResult(
-            face_angle_deg=0.0,     # Task 7
+            face_angle_deg=np.degrees(self._face_angle_at_impact()),
             tempo_ratio=backswing / downswing,
             path_arc_m=0.0,         # Task 8
             path_direction="unknown",
