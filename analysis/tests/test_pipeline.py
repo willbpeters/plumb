@@ -79,6 +79,26 @@ def test_face_angle_recovered_for_every_arc_type(arc):
     assert result.face_angle_deg == pytest.approx(2.0, abs=0.1)
 
 
+def test_recovery_quality_does_not_depend_on_arc_type():
+    """Invariant 1, stated quantitatively rather than as a tolerance.
+
+    It is not enough that every arc type lands inside tolerance. The ERROR
+    itself must not track arc gain -- if it does, the algorithm contains a
+    putter-type prior that a loose tolerance is merely hiding, and it will grow
+    on real strokes that rotate faster than these.
+
+    This test is the reason the impact instant is taken at the middle of the
+    acceleration spike rather than at its leading edge. With the leading edge
+    the spread is 0.0356 deg; with the midpoint it is 0.0004 deg."""
+    errors = {}
+    for arc in ArcType:
+        _, _, result = run_stroke(
+            StrokeParams(face_angle_at_impact_deg=2.0, arc_type=arc))
+        errors[arc.name] = result.face_angle_deg - 2.0
+    spread = max(errors.values()) - min(errors.values())
+    assert spread < 0.005, f"recovery error varies with arc type: {errors}"
+
+
 def test_face_angle_does_not_depend_on_stroke_size():
     """A longer backswing delivering the same face angle must report the same
     number. Face angle is an attitude difference between two instants, so
