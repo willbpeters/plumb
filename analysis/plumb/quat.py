@@ -98,3 +98,15 @@ def from_matrix(m: np.ndarray) -> np.ndarray:
     q[j + 1] = (m[j, i] + m[i, j]) / s
     q[k + 1] = (m[k, i] + m[i, k]) / s
     return normalize(q)
+
+
+def rot_x(angle: float) -> np.ndarray:
+    return from_axis_angle(np.array([1.0, 0.0, 0.0]), angle)
+
+
+def rot_y(angle: float) -> np.ndarray:
+    return from_axis_angle(np.array([0.0, 1.0, 0.0]), angle)
+
+
+def rot_z(angle: float) -> np.ndarray:
+    return from_axis_angle(np.array([0.0, 0.0, 1.0]), angle)

@@ -77,3 +77,18 @@ def test_from_rotation_matrix_roundtrip_trace_negative():
         quat.rotate(q, np.array([0.0, 1.0, 0.0])),
         atol=1e-12,
     )
+
+
+def test_axis_rotation_helpers_pin_their_axes():
+    np.testing.assert_allclose(
+        quat.rotate(quat.rot_x(np.pi / 2), np.array([0.0, 1.0, 0.0])),
+        [0.0, 0.0, 1.0], atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        quat.rotate(quat.rot_y(np.pi / 2), np.array([0.0, 0.0, 1.0])),
+        [1.0, 0.0, 0.0], atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        quat.rotate(quat.rot_z(np.pi / 2), np.array([1.0, 0.0, 0.0])),
+        [0.0, 1.0, 0.0], atol=1e-12,
+    )
