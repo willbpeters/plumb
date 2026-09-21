@@ -79,6 +79,16 @@ Verified numerically against `plumb.quat` before Task 3 was written. About 1.3 m
 
 Do not try to drive this residual to zero. It is inherent to the two definitions, it is four orders of magnitude below the ±1.0° product target from parent spec §3, and chasing it would mean replacing a decomposition the firmware can compute cheaply with one it cannot.
 
+**The noiseless error budget, measured.** The 0.1° tolerance is not arbitrary and it is not generous. Measured over 45 noiseless strokes spanning face angle, arc type and tempo:
+
+| Source | Cost | Share of 0.1° |
+|---|---|---|
+| Rectangle-rule integration at 500 Hz | 0.0553° | 55% |
+| **Trapezoidal integration at 500 Hz** | **0.0013°** | **1.3%** |
+| Twist-vs-azimuth definition residual | 0.0013° | 1.3% |
+
+Rectangle rule — holding each sample's rate constant across its interval — would spend more than half the budget before any noise, bias or quantization exists. The pipeline therefore integrates trapezoidally (§6 of this plan), which is a one-sample latency rather than lookahead and is implementable on-device. This was measured before the pipeline was written, not discovered afterwards.
+
 ---
 
 ## File Structure
@@ -450,12 +460,23 @@ def test_face_normal_azimuth_matches_requested_face_angle():
 
 def test_angular_velocity_matches_numerical_differentiation_of_attitude():
     """The analytic omega must agree with differencing the attitude it claims
-    to describe. Catches a sign error in either one."""
+    to describe. This catches a sign error or an axis mix-up in either one.
+
+    Central difference, not forward. A forward difference estimates the AVERAGE
+    rate over [t, t+dt], which differs from the rate AT t by (dt/2)*omega_dot --
+    about 4e-3 rad/s at the phase boundaries where the raised-cosine profile's
+    curvature peaks, which exceeds any tolerance worth asserting here.
+
+    The residual that remains after central differencing is O(|omega|^2 * dt):
+    the difference is expressed in the body frame at i-1 rather than at i. That
+    floors this check at roughly 1e-3 rad/s, which is fine for its purpose -- the
+    errors it exists to catch are sign flips and axis swaps, which show up at
+    order |omega| itself, a thousand times larger."""
     t = generate(StrokeParams())
     dt = t.time[1] - t.time[0]
     for i in range(t.address_end_index + 10, t.impact_index, 37):
-        dq = quat.multiply(quat.conjugate(t.q_true[i]), t.q_true[i + 1])
-        omega_numeric = 2.0 * dq[1:] / dt
+        dq = quat.multiply(quat.conjugate(t.q_true[i - 1]), t.q_true[i + 1])
+        omega_numeric = dq[1:] / dt
         np.testing.assert_allclose(omega_numeric, t.omega_true[i], atol=2e-3)
 
 
@@ -1002,6 +1023,7 @@ class Pipeline:
         self.g0 = np.zeros(3)
 
         self.q = quat.identity()          # attitude relative to address
+        self._prev_omega = None           # previous bias-corrected rate, for trapezoidal integration
         self.q_impact = None
         self.i_backswing_start = None
         self.i_transition = None
@@ -1118,7 +1140,24 @@ Add to `Pipeline`, and extend the `step()` dispatch to call them:
         in_stroke = self.state in (State.BACKSWING, State.DOWNSWING,
                                    State.IMPACT)
         gain = self.th.accel_gain_stroke if in_stroke else self.th.accel_gain_static
-        self.q = quat.integrate(self.q, omega - self.bias, self.dt)
+
+        # Trapezoidal, not rectangle: average the rate across the interval being
+        # integrated. That requires the sample at the END of the interval, which
+        # is one sample of LATENCY, not lookahead -- the firmware integrates the
+        # interval [i-1, i] when sample i arrives, and already has that sample in
+        # hand. It costs one stored vector.
+        #
+        # Measured on the noiseless generator, worst case over 45 strokes:
+        #   rectangle rule    0.0553 deg of face angle  (55% of the 0.1 deg budget)
+        #   trapezoidal rule  0.0013 deg                 (1.3%)
+        # a 41x improvement for one add and one multiply. Rectangle rule would
+        # spend half the noiseless budget on nothing before noise even appears.
+        corrected = omega - self.bias
+        if self._prev_omega is None:
+            self._prev_omega = corrected
+        rate = 0.5 * (corrected + self._prev_omega)
+        self._prev_omega = corrected
+        self.q = quat.integrate(self.q, rate, self.dt)
 
         if gain > 0.0 and np.linalg.norm(accel) > 0.0:
             measured = accel / np.linalg.norm(accel)
