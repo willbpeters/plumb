@@ -939,12 +939,13 @@ def test_gyro_bias_is_nulled_at_address():
     np.testing.assert_allclose(np.degrees(pipe.bias), [1.5, 1.5, 1.5], atol=0.1)
 
 
-def test_state_machine_visits_every_state_in_order():
+def test_backswing_is_detected():
     _, pipe, _ = run_stroke(StrokeParams())
-    order = [State.IDLE, State.ADDRESS, State.BACKSWING, State.DOWNSWING,
-             State.IMPACT, State.FOLLOWTHROUGH, State.DONE]
-    assert pipe.visited == order
+    assert pipe.state is State.BACKSWING
+    assert pipe.visited == [State.IDLE, State.ADDRESS, State.BACKSWING]
 ```
+
+Note: the full state-machine walk is asserted in Task 6, once the remaining states exist. Every task in this plan leaves the suite green — a red suite at a commit boundary makes it impossible to tell a known-incomplete feature from a regression.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1030,7 +1031,7 @@ class Pipeline:
         self.n = 0
 
         self._still: list[np.ndarray] = []
-        self._accel_sum = np.zeros(3)
+        self._still_accel: list[np.ndarray] = []
         self.address_captured = False
         self.bias = np.zeros(3)
         self.g0 = np.zeros(3)
@@ -1069,16 +1070,25 @@ class Pipeline:
         return None
 
     def _step_idle(self, omega, accel) -> None:
+        """Wait for stillness, then capture both references at once.
+
+        Parent spec 7.1: entering ADDRESS captures the gravity vector g0 and the
+        gyro bias, both as means over the SAME stillness window. Averaging
+        gravity over a longer span than the stillness test covers would mean
+        averaging over motion the stillness test never vetted.
+        """
         window = int(self.th.stillness_window_s / self.dt)
         self._still.append(omega)
-        self._accel_sum += accel
+        self._still_accel.append(accel)
         if len(self._still) < window:
             return
         self._still = self._still[-window:]
+        self._still_accel = self._still_accel[-window:]
+
         recent = np.array(self._still)
         if np.all(recent.std(axis=0) < self.th.stillness_gyro_std_rad):
             self.bias = recent.mean(axis=0)
-            self.g0 = self._accel_sum / self.n
+            self.g0 = np.array(self._still_accel).mean(axis=0)
             self.address_captured = True
             self.q = quat.identity()
             self._enter(State.ADDRESS)
@@ -1094,10 +1104,10 @@ class Pipeline:
             self._hold = 0
 ```
 
-- [ ] **Step 4: Run tests — two pass, one fails**
+- [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd analysis && uv run pytest tests/test_pipeline.py -v`
-Expected: `test_reaches_address_and_captures_gravity` PASS, `test_gyro_bias_is_nulled_at_address` PASS, `test_state_machine_visits_every_state_in_order` FAIL (only reaches BACKSWING). That failure is the next task's entry point.
+Run: `cd analysis && uv run pytest -v`
+Expected: 34 passed (31 existing plus 3 new)
 
 - [ ] **Step 5: Commit**
 
@@ -1118,6 +1128,13 @@ git commit -m "Add pipeline address detection and per-stroke gyro bias nulling"
 
 ```python
 # append to analysis/tests/test_pipeline.py
+
+def test_state_machine_visits_every_state_in_order():
+    _, pipe, _ = run_stroke(StrokeParams())
+    order = [State.IDLE, State.ADDRESS, State.BACKSWING, State.DOWNSWING,
+             State.IMPACT, State.FOLLOWTHROUGH, State.DONE]
+    assert pipe.visited == order
+
 
 @pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
 def test_tempo_ratio_recovered(tempo):
