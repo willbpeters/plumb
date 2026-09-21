@@ -1052,6 +1052,7 @@ class Pipeline:
         self._last_same_sign_n = None
         self._backswing_axis = None
         self._backswing_sign = None
+        self._impact_window: list[tuple[int, np.ndarray]] = []
 
     # -- conversion ------------------------------------------------------
     def _to_rad_s(self, counts: np.ndarray) -> np.ndarray:
@@ -1282,11 +1283,41 @@ Add to `Pipeline`, and extend the `step()` dispatch to call them:
 
     def _step_downswing(self, omega, accel) -> None:
         if np.linalg.norm(accel) > self.th.impact_accel_mps2:
-            self.i_impact = self.n
-            self.q_impact = self.q.copy()
+            self._impact_window = [(self.n, self.q.copy())]
             self._enter(State.IMPACT)
 
     def _step_impact(self, omega, accel) -> None:
+        """Take the impact instant as the MIDDLE of the acceleration spike.
+
+        The threshold fires on the spike's rising edge, one or more samples
+        before the strike. Sampling attitude there includes residual pre-impact
+        rotation, and because that leak couples through the shaft axis it scales
+        with how fast the face was rotating -- measured as 0.037 deg of error for
+        a straight stroke against 0.072 deg for an arced one. Accuracy that
+        tracks arc type is a putter-type prior (invariant 1), even at that size,
+        and it would grow on faster real strokes.
+
+        The peak cannot be used: the spike saturates (parent spec 6.4, and a
+        60 g impulse against a 16 g full scale can do nothing else), so several
+        samples read the same clipped value and the peak carries no information.
+
+        The midpoint of the above-threshold run is threshold-insensitive,
+        saturation-robust, and unbiased for a symmetric impulse. Measured worst
+        error falls from 0.0733 deg to 0.0012 deg, and the arc-type spread from
+        0.0356 deg to 0.0004 deg.
+
+        Cost is a few samples of latency against a 500 ms budget, and a short
+        buffer of attitudes -- past data only.
+
+        Phase 2 note: a real strike may not be symmetric, since the putter
+        decelerates and then the ball departs. Whether the midpoint stays
+        unbiased on real impulses is a question for the logged corpus, like
+        every threshold here.
+        """
+        if np.linalg.norm(accel) > self.th.impact_accel_mps2:
+            self._impact_window.append((self.n, self.q.copy()))
+            return
+        self.i_impact, self.q_impact = self._impact_window[len(self._impact_window) // 2]
         self._enter(State.FOLLOWTHROUGH)
 
     def _step_followthrough(self, omega, accel):
@@ -1386,12 +1417,40 @@ def test_face_angle_recovered_for_every_arc_type(arc):
     assert result.face_angle_deg == pytest.approx(2.0, abs=0.1)
 
 
-def test_face_angle_is_relative_to_address_not_absolute():
-    """Invariant 3. Rotating the whole stroke in heading must not change the
-    reported face angle."""
+def test_recovery_quality_does_not_depend_on_arc_type():
+    """Invariant 1, stated quantitatively rather than as a tolerance.
+
+    It is not enough that every arc type lands inside tolerance. The ERROR
+    itself must not track arc gain -- if it does, the algorithm contains a
+    putter-type prior that a loose tolerance is merely hiding, and it will grow
+    on real strokes that rotate faster than these.
+
+    This test is the reason the impact instant is taken at the middle of the
+    acceleration spike rather than at its leading edge. With the leading edge
+    the spread is 0.0356 deg; with the midpoint it is 0.0004 deg."""
+    errors = {}
+    for arc in ArcType:
+        _, _, result = run_stroke(
+            StrokeParams(face_angle_at_impact_deg=2.0, arc_type=arc))
+        errors[arc.name] = result.face_angle_deg - 2.0
+    spread = max(errors.values()) - min(errors.values())
+    assert spread < 0.005, f"recovery error varies with arc type: {errors}"
+
+
+def test_face_angle_does_not_depend_on_stroke_size():
+    """A longer backswing delivering the same face angle must report the same
+    number. Face angle is an attitude difference between two instants, so
+    nothing about the size of the motion between them should enter it.
+
+    This is also a weak check on invariant 3: attitude is integrated from
+    identity at address, so the reported angle is address-relative by
+    construction and no absolute heading can leak in. There is no heading
+    parameter in the generator to vary, because the device has no heading
+    reference to be wrong about."""
     a = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0))[2]
     b = run_stroke(StrokeParams(face_angle_at_impact_deg=2.0,
-                                backswing_amplitude_deg=15.0))[2]
+                                backswing_amplitude_deg=15.0,
+                                followthrough_amplitude_deg=15.0))[2]
     assert a.face_angle_deg == pytest.approx(b.face_angle_deg, abs=0.1)
 ```
 
