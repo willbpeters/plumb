@@ -10,7 +10,17 @@ already written in, and the compiler is invoked directly rather than through a
 shell. One implementation -- the same reasoning that put the board connect
 sequence in tools/board.py.
 
-Falls back to cc/gcc/clang wherever one exists, so this is not tied to Windows.
+Falls back to cc/gcc/clang wherever one exists, so this is not tied to Windows,
+then to MSVC, then to `zig cc` from the `ziglang` wheel.
+
+Zig is last in the chain and first in importance. A system compiler is better
+when there is one -- it is what the device toolchain most resembles -- but the
+machine this was written on had none of the three, and the honest consequence
+was that the differential test skipped and the port went unverified. `ziglang`
+is a complete clang toolchain that arrives with `uv sync`, needs no admin
+rights and installs nothing system-wide, so the skip stops being reachable in
+normal use. The skip stays in the code for the machine that somehow has
+neither, because a loud skip is still better than a quiet pass.
 """
 
 import os
@@ -74,6 +84,21 @@ def _msvc():
     return cl, include, lib
 
 
+def _zig():
+    """Path to the zig executable from the `ziglang` wheel, if it is installed.
+
+    Imported rather than looked for on PATH: the wheel does not put anything on
+    PATH, and importing it is how you find out where it unpacked itself.
+    """
+    try:
+        import ziglang
+    except ImportError:
+        return None
+    zig = Path(ziglang.__file__).resolve().parent / ("zig.exe" if os.name == "nt"
+                                                     else "zig")
+    return zig if zig.is_file() else None
+
+
 def describe_toolchain() -> str:
     """What this machine would build with, for reporting in a skip or a log."""
     unix = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
@@ -82,6 +107,9 @@ def describe_toolchain() -> str:
     msvc = _msvc()
     if msvc:
         return f"msvc: {msvc[0]}"
+    zig = _zig()
+    if zig:
+        return f"zig: {zig}"
     return "none"
 
 
@@ -102,13 +130,8 @@ def build(name: str, *defines: str) -> BuildResult:
                    *(str(s) for s in SOURCES), "-lm", "-o", str(output)]
         environment = None
         label = f"unix:{Path(unix).name}"
-    else:
-        msvc = _msvc()
-        if msvc is None:
-            raise CompilerNotFound(
-                "no host C compiler found (looked for cc, gcc, clang, then "
-                "MSVC under Program Files)")
-        cl, include, lib = msvc
+    elif _msvc() is not None:
+        cl, include, lib = _msvc()
         objects = HARNESS / "obj"
         objects.mkdir(exist_ok=True)
         command = [str(cl), "-nologo", "-TC", "-O2", "-W4", "-WX",
@@ -124,6 +147,24 @@ def build(name: str, *defines: str) -> BuildResult:
         environment["INCLUDE"] = os.pathsep.join(str(p) for p in include)
         environment["LIB"] = os.pathsep.join(str(p) for p in lib)
         label = "msvc"
+
+    else:
+        zig = _zig()
+        if zig is None:
+            raise CompilerNotFound(
+                "no host C compiler found (looked for cc, gcc, clang, then "
+                "MSVC under Program Files, then `zig cc` from the ziglang "
+                "wheel -- `uv sync` in analysis/ installs that one)")
+        # Same flags as the unix branch, because zig cc IS clang. Keeping them
+        # identical is deliberate: a warning that only one toolchain emits is a
+        # warning nobody sees.
+        command = [str(zig), "cc", "-std=c99", "-O2", "-Wall", "-Wextra",
+                   "-Werror",
+                   f"-I{COMPONENT / 'include'}",
+                   *(f"-D{d}" for d in defines),
+                   *(str(s) for s in SOURCES), "-lm", "-o", str(output)]
+        environment = None
+        label = "zig"
 
     result = subprocess.run(command, capture_output=True, text=True,
                             env=environment, cwd=str(HARNESS))

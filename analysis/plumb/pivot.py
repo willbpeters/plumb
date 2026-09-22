@@ -42,6 +42,52 @@ uncertainty, estimated from the fit's residual. That is a measurement of what
 the stroke actually observed rather than a threshold on what it ought to look
 like, and it is self-calibrating: a quieter sensor keeps more directions.
 
+THE SIGNIFICANCE TEST DOES NOT ACTUALLY DO THAT. Measured 2026-09-22, five
+strokes folded into one PivotCalibration, true d = (0, 0, -0.55) in every row:
+
+    noise    lie   putter          d_x       d_y       d_z   rank
+     0.00    5.0   arced       -0.0097    0.0306   -0.5571      3
+     0.00    5.0   straight    -0.0090    0.0000   -0.5681      2
+     0.05    5.0   straight    -0.0091    0.4198   -0.5679      3   <-- 0.42 m
+     0.28    5.0   straight    -0.0089   -0.0001   -0.5660      2
+     0.28    5.0   arced       -0.0115    0.0832   -0.5364      3
+     0.28   20.0   arced       -0.0114    0.0826   -0.5367      3
+
+Three things are wrong and all three are visible above.
+
+1. At 0.05 dps a straight-faced putter reports 0.42 m ACROSS the shaft where
+   the truth is zero, and the test admits it at rank 3. That is the same
+   failure the paragraph above says this test prevents, at a smaller magnitude
+   than the 1.04 m that motivated it. It is NOT monotonic in noise -- correct
+   at 0.00, wrong at 0.05, correct again at 0.28 -- so it is not a threshold
+   set to the wrong number. `residual_fraction` sits at 0.045 in every row, so
+   sigma_b barely moves with noise and the error bar is not tracking the thing
+   it is supposed to track.
+
+2. d_y depends on PUTTER TYPE: 0.083 for an arced putter against 0.000 for a
+   straight-faced one at the same noise. Swing geometry is being read out of
+   face rotation. test_path_arc_barely_depends_on_putter_type passes anyway,
+   because it bounds the ARC spread at half a millimetre and the arc is
+   insensitive to the component that is wrong -- the same near-degeneracy that
+   lets d_y be wrong is what stops it mattering. It mattered here only because
+   somebody printed d itself.
+
+3. d_x is a consistent -0.010 that should also be zero, and d_z reads -0.536
+   to -0.568 against -0.550.
+
+Consequence for the reported arc, at a 5 deg lie and 0.28 dps: substituting
+the true d into the same noisy stroke moves it from 1.244 of truth to 1.096,
+so roughly 60% of the arc error documented as open defect 4 is this, not the
+peak-to-peak statistic that defect names.
+
+THE LIKELY FIX IS NOT WRITTEN, deliberately. Constraining d to the shaft axis
+collapses this to one unknown, deletes both spurious components and removes
+the eigendecomposition entirely -- but the synthetic generator PUTS the pivot
+on the shaft axis, so the harness would score that change against its own
+assumption. A real shoulder-driven stroke pivots near the base of the neck,
+which is off-axis. This one needs the Phase 2 corpus to decide, not a test
+that already agrees with it.
+
 Why the angular rate is filtered first. The noise here is in the DESIGN matrix,
 not only in the measurement: omega and omega_dot both build K. Least squares
 with a noisy design matrix is biased toward zero -- feed it the raw signal at
@@ -62,8 +108,12 @@ constant, so `LPF[K d] = LPF[K] d` exactly -- filtering both sides leaves the
 equation untouched. Filtering only K leaves K lagging b by the filter's phase,
 which showed up as a 1.5% bias on otherwise perfect data.
 
-Nothing here keys off face rotation, so nothing here carries a putter-type
-prior (invariant 1). The pivot is swing geometry: where the golfer's hands are.
+Nothing here keys off face rotation and nothing normalises against expected
+rotation, so there is no putter-type prior in the sense invariant 1 prohibits.
+But the ESTIMATE does come out different for an arced and a straight-faced
+putter -- see item 2 above -- so the statement that used to close this
+docstring, that the pivot is pure swing geometry, is not what the measurement
+says. It is what the model says. The gap between the two is the open defect.
 """
 
 from dataclasses import dataclass
@@ -76,9 +126,14 @@ import numpy as np
 SINGULAR_VALUE_CUTOFF = 1e-12
 
 # How many standard errors a direction's coefficient must clear to be reported.
-# Two is the usual bar for "distinguishable from nothing", and the result is
-# not sensitive to it: the observed directions clear it by orders of magnitude
-# and the unobserved ones miss by orders of magnitude.
+# Two is the usual bar for "distinguishable from nothing".
+#
+# This was documented as insensitive -- "the observed directions clear it by
+# orders of magnitude and the unobserved ones miss by orders of magnitude" --
+# and the table at the top of this file shows a case where an unobserved
+# direction clears it and reports 0.42 m. Do not tune this number to make that
+# case behave (invariant 5). The error bar it is compared against is what is
+# wrong, and a threshold that has to be tuned per noise level is the evidence.
 SIGNIFICANCE_SIGMAS = 2.0
 
 # Below this many samples there is no averaging to speak of and the estimate is

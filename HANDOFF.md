@@ -1,9 +1,9 @@
 # Handoff — Plumb
 
-**Date:** 2026-09-21 (third session of the day)
+**Date:** 2026-09-22
 **For:** Claude Code, picking this project up cold
-**Supersedes:** the earlier 2026-09-21 handoff, which was written before the
-direct-register experiment ran
+**Supersedes:** the 2026-09-21 handoff. Defect 4 was re-measured this session and
+its diagnosis CHANGED; defect 6 is new. Read both before touching path.
 
 ---
 
@@ -48,10 +48,10 @@ The blocking defect is gone.
 | **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
-| **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
+| **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 5. |
 | **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
 | **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. 122 tests. |
-| **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source. |
+| **C port, started** | `firmware/components/plumb/` — `quat.c` ported, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source. **The "bit-identical" claim is toolchain-dependent — see "The compiler" below.** |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 ### What the direct-register experiment settled
@@ -94,20 +94,33 @@ experiment confirmed it. It did.
 3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
    there is 3× margin against the threshold that matters.
-4. **Arc is reported as `ptp(lateral)`, and peak-to-peak of an integrated signal is biased
-   upward by noise.** A maximum minus a minimum collects the extremes of the random walk, so the
-   bias grows as the true arc shrinks. Measured at 0.28 dps over strokes 5–10, arc as a fraction
-   of truth:
+4. **The arc reads 124% of truth under noise, and not for the reason this defect
+   used to give.** It said `ptp(lateral)` collects the extremes of the random walk
+   that integration lays on top of the signal. That is real, and it is the smaller
+   half. Substituting the TRUE pivot offset into the same noisy stroke separates them,
+   at a 5 deg lie and 0.28 dps with the calibration converged:
 
-   | lie | before the pivot fix | after |
-   |---|---|---|
-   | 5° | 0.665 | 1.244 |
-   | 20° | 0.620 | 1.086 |
+   | | arc / truth |
+   |---|---|
+   | truth | 1.000 |
+   | pipeline, zero noise | 1.051 (pivot filter bias, already documented) |
+   | noisy samples, **true** pivot substituted in | 1.096 - this part IS the old defect 4 |
+   | noisy samples, estimated pivot | **1.244** |
 
-   It was there all along, pulling the opposite way to the 39% shortfall and hidden underneath
-   it. **This is the next piece of offline work on path**, and it needs no hardware: a spread
-   statistic that is not a peak-to-peak, or a smooth fit to the track before measuring it.
-   Direction classification — what the screen actually shows — is unaffected either way.
+   So about 60% of the excess belongs to the pivot ESTIMATE, not to the statistic, and
+   no change of statistic reaches it. Measured directly: a quadratic fit of lateral
+   against forward - the smooth fit the last handoff proposed - scores 1.237 against
+   ptp's 1.244. Effectively nothing.
+
+   Pinned by `test_arc_magnitude_meets_the_spec_target_under_noise`, `xfail(strict=True)`
+   at a 5 deg lie and passing at 20 deg. That split IS the finding: the same absolute
+   error is 24% of a 6 mm arc and 8.6% of a 24 mm one, so the device passes its own
+   acceptance test on an arced stroke and fails it on the straight one it most needs to
+   get right. Strict, so it fails the day someone fixes it and forgets to promote it.
+
+   What remains genuinely attributable to the statistic is the 1.051 -> 1.096 step, and
+   that has not been chased yet.
+
 5. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
    captures an hour apart on an untouched board: the quietest half-second windows agreed to
    within 10% (0.22 against 0.24 dps), while the worst window went from 0.41 to **1.217 dps —
@@ -115,42 +128,90 @@ experiment confirmed it. It did.
    it. This is not a reason to raise the threshold (invariant 5), it is a reason the Phase 2
    corpus has to be recorded somewhere representative or it answers the wrong question.
 
-**Resolved this session:** the FIFO sample loss (routed around), the corrupted FIFO reads
+6. **The pivot's significance test does not do what its docstring says, and reports
+   0.42 m of offset where the truth is zero.** Five strokes folded into one
+   `PivotCalibration`, true `d = (0, 0, -0.55)` in every row:
+
+   | noise | putter | d_x | d_y | d_z | rank |
+   |---|---|---|---|---|---|
+   | 0.00 | straight | -0.0090 | **0.0000** | -0.5681 | 2 |
+   | 0.05 | straight | -0.0091 | **0.4198** | -0.5679 | 3 |
+   | 0.28 | straight | -0.0089 | **-0.0001** | -0.5660 | 2 |
+   | 0.28 | arced | -0.0115 | **0.0832** | -0.5364 | 3 |
+
+   - The 0.42 m row is the exact failure the significance test was written to prevent;
+     its own docstring cites a 1.04 m version of it. It is **not monotonic in noise** -
+     right at 0.00, wrong at 0.05, right again at 0.28 - so it is not a threshold set to
+     the wrong number. `residual_fraction` is 0.045 in every row, so the error bar barely
+     moves with noise and is not tracking what it is meant to track. **Do not tune
+     `SIGNIFICANCE_SIGMAS`** (invariant 5); the quantity it is compared against is wrong.
+   - `d_y` differs between an arced and a straight-faced putter, 0.083 against 0.000.
+     `test_path_arc_barely_depends_on_putter_type` passes anyway, because it bounds the
+     ARC spread at half a millimetre and the arc is insensitive to the component that is
+     wrong - the same near-degeneracy that lets `d_y` be wrong is what stops it
+     mattering. It only became visible because `d` itself got printed. That is the
+     "print measured values, do not just assert them" convention paying out again.
+
+   **The likely fix is deliberately not written.** Constraining `d` to the shaft axis
+   collapses this to one unknown, deletes both spurious components, and removes the
+   eigendecomposition and this significance test entirely. But the synthetic generator
+   PUTS the pivot on the shaft axis, so the harness would score that change against its
+   own assumption - the "test that only checks the code against itself" trap this
+   project has now been bitten by four times. A real shoulder-driven stroke pivots near
+   the base of the neck, which is off-axis. **This one needs the Phase 2 corpus.**
+   Full measurements and the reasoning are in `analysis/plumb/pivot.py`.
+
+**Resolved 2026-09-22:** the differential test was silently skipping for want of a compiler
+(see "The compiler"), and the diagnosis of defect 4 was wrong. Suite: **133 passed, 1 xfailed**.
+
+**Resolved 2026-09-21:** the FIFO sample loss (routed around), the corrupted FIFO reads
 (quantified, and no longer in the signal path), the intermittent init (soft reset + the
 datasheet's 15 ms, not the 150 ms it was first read as), and a capture defect that could
 silently splice stale frames into a measurement.
 
 ---
 
-## ▸ Next task — pick one of three
+## ▸ Next task
 
-Nothing is blocked on code any more. In order of what unblocks the most:
+**Phase 2 — the logged corpus — is now the only item that is not waiting on itself.** That
+changed this session. Both remaining software tasks turned out to be blocked on data:
+`pipeline.c` on thresholds that do not exist, and `pivot.c` on a defect whose fix cannot be
+chosen without real strokes (defect 6). The three options below are kept in the old order so
+the reasoning is visible, but 3 is the one to do.
 
-**1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
-the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
+**1. Continue the C port — but `pipeline.c` is premature.** `quat.c` is done and the
+infrastructure round it works, which was the risky part. What is left is `pivot.c` and then
+`pipeline.c`.
 
-```
-cd analysis; uv run pytest tests/test_c_port.py -q -s
-```
+`pipeline.c` should NOT be started yet. Every detection threshold in it comes from the logged
+corpus (invariant 5), that corpus does not exist, and the values in `Thresholds` say in their
+own docstring that they are placeholders for the synthetic harness. Porting the state machine
+now means translating code built round numbers that are still blank, and re-translating it
+after Phase 2.
 
-builds the harness and prints the worst difference per operation. It came back **0.000e+00 on
-every quaternion operation in double precision** — the C reproduces NumPy bit for bit, because
-the translation keeps the arithmetic in the Python's order. Floating-point addition is not
-associative, so tidying an expression while translating changes the last bits and turns a clean
-diff into an investigation. Keep doing it that way.
+`pivot.c` is not blocked on thresholds, but it is now blocked on something else: open defect 6
+says the estimator it would port has a spurious component in it, and the likely fix deletes the
+eigendecomposition that is most of the porting work. **Do not port `pivot.py` until defect 6 is
+resolved.**
 
-Two things to know before continuing:
+So the honest state of next-task 1 is: the part that could be done has been, and the rest waits
+on data.
 
-- **The precision decision is open and now has numbers.** See `real.h`. Single precision costs
-  about one ulp per operation (1.0–1.6e-07), which matters because the ESP32-S3's FPU is
-  single-precision and doubles are emulated in software at 896.8 Hz. What is **not** measured is
-  what that does across a whole stroke, where the integrator accumulates ~1300 steps. Measure
-  that before switching; one ulp per step is not one ulp per stroke.
-- **The build lives in `analysis/tools/cbuild.py`, not in a shell script.** It discovers the
-  toolchain itself — cc/gcc/clang, else MSVC, which is driven directly because `vcvars64.bat`
-  hangs in Git Bash here. It was a shell script for about an hour, and in that hour running
-  the suite from PowerShell skipped all ten cases silently and read as a pass, because `sh`
-  was not on PATH. Verify the port test actually RAN, not merely that it was green.
+### The compiler
+
+`real.h` records the double-precision column as exactly `0.000e+00`. **That is MSVC's answer,
+not a property of the port.** This machine has no MSVC, no LLVM and no MinGW, so the
+differential test was skipping entirely — the failure mode commit c637ee7 exists to prevent,
+arriving by a different door. Fixed by adding `ziglang` (a self-contained clang toolchain on
+PyPI) as a dev dependency and teaching `tools/cbuild.py` to find it; `uv sync` now brings a
+compiler with it and the skip is unreachable in normal use.
+
+Built with `zig cc`, the same cases come back at **2.2e-16** rather than zero — one ulp,
+consistent with clang contracting `a*b + c*d` into an FMA where MSVC does not. Not chased
+further, because one part in 10^16 is meaningless against a 0.22 dps sensor floor. Worth knowing
+only so that the next person does not read a non-zero number as a translation error. If the
+sharp "exactly zero means no translation error" signal is wanted back, `-ffp-contract=off`
+is the flag; it compiles clean, and whether it restores the zero was not measured.
 
 **2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
@@ -159,9 +220,13 @@ unit's calibration into a shared constant trades a known error for a hidden one.
 options: per-unit calibration, or firmware that measures its own rate at startup — which it can
 now do in about ten lines, since the counter exists and works.
 
-**3. Phase 2, the logged corpus.** The instrument is trustworthy enough to log strokes with.
-Capture motion windows, not strokes — see §2.1 of the instrument spec for why that ordering
-matters, and invariant 5 for why thresholds cannot come first.
+**3. Phase 2, the logged corpus — DO THIS ONE.** The instrument is trustworthy enough to log
+strokes with. Capture motion windows, not strokes — see §2.1 of the instrument spec for why that
+ordering matters, and invariant 5 for why thresholds cannot come first.
+
+It now unblocks three separate things rather than one: the `Thresholds` values, the choice
+between a 3-DOF and a shaft-constrained pivot (defect 6), and with it `pivot.c` and
+`pipeline.c`. It also needs the board, which the last two sessions of software work did not.
 
 The tap test (§5.5) is still the highest-risk unknown in the project, and it is still blocked on
 a printed base *and* on sampling above 1 kHz. The untried option for the second: 1793.6 Hz with

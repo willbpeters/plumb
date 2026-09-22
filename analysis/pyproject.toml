@@ -10,7 +10,14 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+# ziglang is a self-contained clang toolchain published on PyPI, and it is a dev
+# dependency so that the C differential test can actually RUN. This machine has
+# no MSVC, no LLVM and no MinGW, and tools/cbuild.py degrades to a pytest.skip
+# when it finds no compiler -- which is exactly the "reads as a pass, verified
+# nothing" failure that commit c637ee7 was written to kill. A compiler that
+# arrives with `uv sync`, needs no admin rights and no system install, makes
+# that skip unreachable in practice.
+dev = ["pytest>=8.0", "ziglang>=0.13"]
 
 [build-system]
 requires = ["hatchling"]

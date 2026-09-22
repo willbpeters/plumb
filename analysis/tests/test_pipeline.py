@@ -331,3 +331,80 @@ def test_the_pivot_converges_when_calibrated_across_strokes():
     assert one > 0.10, f"one stroke should be poor, was {100 * one:.1f}%"
     assert five < 0.05, f"five strokes should converge, was {100 * five:.1f}%"
     assert abs(after[10] + 0.55) / 0.55 < 0.08
+
+
+@pytest.mark.parametrize("lie", [
+    # A 6 mm arc does not absorb the error; a 24 mm one does. The lie angle is
+    # the knob that changes the true arc without changing anything else, so
+    # parametrising on it is what makes the dependence visible rather than
+    # averaged away.
+    pytest.param(5.0, marks=pytest.mark.xfail(
+        strict=True,
+        reason="open defect 4: arc reads 124% of truth at a 5 deg lie. "
+               "Most of it is the pivot estimate, not the statistic -- "
+               "see the measurements in this test's docstring.")),
+    20.0,
+])
+def test_arc_magnitude_meets_the_spec_target_under_noise(lie):
+    """Parent spec section 3 asks 10% of arc magnitude. Under noise it is not met.
+
+    This is open defect 4, and measuring it moved the diagnosis. The handoff
+    attributed the inflation to `ptp(lateral)` collecting the extremes of the
+    random walk that integration lays on top of the signal. That effect is
+    real and it is the smaller half. Substituting the TRUE pivot offset into
+    the same noisy stroke isolates the two:
+
+        lie 5 deg, 0.28 dps, pivot calibration converged over 5 strokes
+
+        truth                                     1.000
+        pipeline, zero noise                      1.051   pivot filter bias
+        noisy samples, TRUE pivot substituted     1.096   <- this is defect 4
+        noisy samples, estimated pivot            1.244   <- what we report
+
+    So roughly 60% of the excess belongs to the pivot ESTIMATE rather than to
+    the statistic, and replacing the statistic cannot reach it. Measured
+    directly: a quadratic fit of lateral against forward, which is the smooth
+    fit the handoff proposed, scores 1.237 against ptp's 1.244.
+
+    What the pivot estimate is doing wrong is recorded in plumb/pivot.py --
+    a spurious lateral component where the truth is zero, reaching 0.42 m in
+    one configuration.
+
+    The 20 deg case is NOT marked xfail, and that is the point of the
+    parametrisation: at a 24 mm arc the same absolute error is 8.6% and lands
+    inside spec. The device would pass its own acceptance test on an arced
+    stroke and fail it on the straight one it most needs to get right.
+    """
+    from plumb.pivot import PivotCalibration
+
+    sensor = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
+                          gyro_bias_dps=1.5)
+    params = StrokeParams(lie_angle_deg=lie)
+    calibration = PivotCalibration()
+
+    ratios = []
+    for seed in range(1, 11):
+        traj = generate(params)
+        out = simulate(traj, sensor, seed=seed)
+        pipe = Pipeline(Thresholds(), out.full_scale,
+                        pivot_calibration=calibration)
+        result = None
+        for i in range(len(traj.time)):
+            r = pipe.step(out.gyro_counts[i], out.accel_counts[i])
+            if r is not None:
+                result = r
+        arc_true, _ = true_face_path(traj, pipe)
+        # Strokes 1-4 are the calibration still converging and are excluded on
+        # purpose; that convergence is measured separately in
+        # test_the_pivot_converges_when_calibrated_across_strokes.
+        if seed >= 5:
+            ratios.append(result.path_arc_m / arc_true)
+
+    mean = sum(ratios) / len(ratios)
+    worst = max(ratios, key=lambda r: abs(r - 1.0))
+    # Printed, not just asserted -- the convention that has found five defects
+    # on this project. A bias shows up here as a mean away from 1.0 even when
+    # the individual strokes scatter either side of it.
+    print(f"\n  lie {lie:>4.1f} deg  mean {mean:.3f}  worst {worst:.3f}  "
+          f"n={len(ratios)}")
+    assert 0.90 < mean < 1.10, f"arc averages {100 * mean:.1f}% of truth"

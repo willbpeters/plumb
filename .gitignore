@@ -8,7 +8,8 @@ __pycache__/
 # capture artefacts
 *.npy
 
-# built by firmware/test/build.sh
+# built by analysis/tools/cbuild.py (build.sh is gone; it needed a shell)
 firmware/test/*.exe
 firmware/test/obj/
 firmware/test/*.obj
+firmware/test/*.pdb
