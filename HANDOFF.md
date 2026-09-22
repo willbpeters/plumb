@@ -48,7 +48,8 @@ The blocking defect is gone.
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
-| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. 110 tests. |
+| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
+| **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. 122 tests. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 ### What the direct-register experiment settled
@@ -74,12 +75,37 @@ experiment confirmed it. It did.
    earlier figure was taken with a capture pipeline that could splice in stale frames). No
    longer on the path to the first build, but it is **the only way to sample above ~1.1 kHz**,
    so §9.5's tap test needs it fixed or needs a different plan.
-2. **Path arc magnitude is ~61% of truth** — a known gap, pinned by a test, documented in
-   `test_path_arc_magnitude_is_known_to_fall_short_of_truth`. Direction classification, which
-   is what the screen shows, is unaffected.
+2. **Path arc magnitude: the 61% shortfall is fixed, and it uncovered a second defect.**
+   The pipeline computed face velocity as `omega x r`, assuming the sensor does not translate.
+   It does — the putter swings about the hands, so the face travels on `r + d`, 1.4 m against
+   the 0.85 m assumed, and 0.85/1.4 = 0.607 was exactly the measured shortfall. `plumb/pivot.py`
+   now estimates `d` per stroke by least squares: the relation is LINEAR in `d`, so a stroke is
+   one over-determined system rather than the thousand independent guesses the abandoned first
+   attempt was making. **Noiseless arc error: 39% → 1.3–5.1%, inside the §3 target.**
+
+   One stroke is not enough at 0.28 dps (17% on the pivot, and 8% under to 84% over on the arc),
+   so `PivotCalibration` sums the normal equations across strokes — inverse-variance weighting
+   for free — and converges to 2.4% by the fifth. That is §8.4's per-golfer calibration,
+   arrived at from measurement.
+
+   **Still not meeting §3 under noise**, and the reason is now a different defect — see 5.
 3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
    there is 3× margin against the threshold that matters.
+5. **Arc is reported as `ptp(lateral)`, and peak-to-peak of an integrated signal is biased
+   upward by noise.** A maximum minus a minimum collects the extremes of the random walk, so the
+   bias grows as the true arc shrinks. Measured at 0.28 dps over strokes 5–10, arc as a fraction
+   of truth:
+
+   | lie | before the pivot fix | after |
+   |---|---|---|
+   | 5° | 0.665 | 1.244 |
+   | 20° | 0.620 | 1.086 |
+
+   It was there all along, pulling the opposite way to the 39% shortfall and hidden underneath
+   it. **This is the next piece of offline work on path**, and it needs no hardware: a spread
+   statistic that is not a peak-to-peak, or a smooth fit to the track before measuring it.
+   Direction classification — what the screen actually shows — is unaffected either way.
 4. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
    captures an hour apart on an untouched board: the quietest half-second windows agreed to
    within 10% (0.22 against 0.24 dps), while the worst window went from 0.41 to **1.217 dps —
@@ -204,6 +230,12 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
 
 ## Blocked on Will
 
+- **▸ Run the axis check.** `cd analysis && uv run python tools/axis_check.py --port COM4`.
+  Built, tested and waiting since 2026-09-21; it needs a hand on the board and ten minutes, and
+  nothing else. It prompts for each step and decides for itself. **Everything in the fusion port
+  is gated on it** — the sign conventions cannot be ported until it is known which gyro channel
+  is which board axis and whether the triad is right-handed. Paste the summary table into
+  `docs/bringup-results.md` under a new "Axes and signs (§9.1)" heading when it is done.
 - **Print a base.** The tap test (§5.5) is still the highest-risk unknown in the project and it
   has not started. If the mount resonates below ~200 Hz, §5.5's escalation runs *before* any
   further firmware work.

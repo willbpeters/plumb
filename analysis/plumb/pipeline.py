@@ -15,6 +15,7 @@ from enum import Enum, auto
 import numpy as np
 
 from plumb import quat
+from plumb.pivot import PivotCalibration, PivotEstimator, skew
 from plumb.sensor import FullScale
 from plumb.trajectory import SAMPLE_RATE_HZ
 
@@ -51,6 +52,14 @@ class Thresholds:
     accel_gain_static: float = 0.02
     accel_gain_stroke: float = 0.0
     path_straight_arc_m: float = 0.003
+    # Low-pass corner for the rate that feeds the pivot fit, in Hz. See
+    # plumb/pivot.py for the measured trade-off this sits on, and note that it
+    # is a filter design rather than a detection threshold.
+    pivot_filter_hz: float = 2.0
+    # Above this unexplained share of the measured acceleration the pivot fit
+    # is not describing a rigid rotation about a fixed point, and the path
+    # falls back to the sensor's own lever arm.
+    pivot_max_residual: float = 0.5
 
 
 @dataclass
@@ -63,7 +72,8 @@ class StrokeResult:
 
 class Pipeline:
     def __init__(self, thresholds: Thresholds, full_scale: FullScale,
-                 lever_arm_m: float = 0.85):
+                 lever_arm_m: float = 0.85,
+                 pivot_calibration: PivotCalibration | None = None):
         self.th = thresholds
         self.fs = full_scale
         self.lever_arm = lever_arm_m
@@ -98,6 +108,25 @@ class Pipeline:
         self._impact_window: list[tuple[int, np.ndarray]] = []
 
         self._face_track: list[np.ndarray] = []
+        # Per-sample R(q) [omega]x dt. The extra face displacement from
+        # the sensor's own translation is exactly this matrix times the pivot
+        # offset, which is not known until the stroke ends -- so the part that
+        # depends on it is carried as a matrix and multiplied out once, rather
+        # than the pipeline waiting or guessing. Nine floats a sample, against
+        # three for the track itself; see the port note in _compute.
+        self._track_matrix: list[np.ndarray] = []
+        # Which samples the face track actually spans. Ground truth has to be
+        # taken over the same window or the comparison measures the window
+        # rather than the algorithm -- see test_pipeline.true_face_path.
+        self._track_first_n: int | None = None
+        self._track_last_n: int | None = None
+        self._pivot = PivotEstimator(self.dt, thresholds.pivot_filter_hz)
+        # Shared across strokes when the caller supplies one. A single stroke
+        # recovers the pivot to only about 17% at this board's noise floor;
+        # five converge to 2.4% (see PivotCalibration). Without one, the path
+        # is computed from this stroke alone and is correspondingly noisy.
+        self._pivot_calibration = pivot_calibration
+        self._pivot_solution = None
         self._impact_track_index = 0
 
     # -- conversion ------------------------------------------------------
@@ -303,8 +332,30 @@ class Pipeline:
         # Only path needs the lever arm; face angle and tempo do not, because
         # angular velocity is identical at every point of a rigid body.
         r_body = np.array([0.0, 0.0, -self.lever_arm])
-        v_face = np.cross(omega - self.bias, r_body)
-        self._face_track.append(quat.rotate(self.q, v_face) * self.dt)
+        v_face = np.cross(corrected, r_body)
+        rotation = quat.to_matrix(self.q)
+        self._face_track.append(rotation @ v_face * self.dt)
+        if self._track_first_n is None:
+            self._track_first_n = self.n
+        self._track_last_n = self.n
+
+        # ...and the part of the face's motion that comes from the sensor
+        # translating rather than rotating in place. The putter swings about
+        # the hands, so the face travels on `r + d`; dropping `d` is what makes
+        # the arc 61% of truth.
+        # A per-sample increment, exactly like the track beside it: both are
+        # summed once, at the end. Accumulating a running total here and then
+        # summing it again integrates the translation twice, which shows up as
+        # an arc of twenty-four metres rather than fourteen millimetres.
+        self._track_matrix.append(rotation @ skew(corrected) * self.dt)
+
+        # Feed the pivot fit, but only before impact. The impact impulse is a
+        # 60 g spike that saturates the accelerometer by design (parent spec
+        # 6.4) and is not rigid-body motion about anything; including it would
+        # let a trigger corrupt a measurement.
+        if self.state in (State.BACKSWING, State.DOWNSWING):
+            gravity_body = quat.rotate(quat.conjugate(self.q), self.g0)
+            self._pivot.update(corrected, accel - gravity_body)
 
     def _dominant_axis(self) -> int:
         recent = np.array(self._omega_history[-25:])
@@ -429,8 +480,34 @@ class Pipeline:
         # a blade swung on the same plane trace the same path and differ only in
         # face rotation. Measured arc is identical across all three arc types to
         # three decimal places, and falls to 0.002 mm for a vertical shaft.
-        track = (np.cumsum(np.array(self._face_track), axis=0)
-                 if self._face_track else np.zeros((1, 3)))
+        # Solve for the pivot offset now the stroke is over, and add the
+        # translation term it unlocks. `d` is the vector from the pivot to the
+        # sensor, so the face swings on `r + d`: with a 0.85 m lever arm and a
+        # 0.55 m pivot offset that is 1.4 m, and 0.85/1.4 = 0.607 is precisely
+        # the arc shortfall this replaces.
+        #
+        # PORT NOTE: the 3x3 per sample costs 48 KB over a 1.5 s stroke at
+        # 896.8 Hz, against 16 KB for the track alone. That is affordable on
+        # this part but it is not free, and invariant 7 already has claims on
+        # internal SRAM. If it becomes tight, the reduction is to assume the
+        # pivot lies on the shaft axis, which collapses the matrix back to a
+        # vector -- at the cost of an assumption about where the hands are that
+        # the measurement currently does not need.
+        if self._pivot_calibration is not None:
+            self._pivot_calibration.fold(self._pivot)
+            self._pivot_solution = self._pivot_calibration.solve()
+        else:
+            self._pivot_solution = self._pivot.solve()
+        track_list = self._face_track
+        if (self._pivot_solution is not None
+                and self._pivot_solution.residual_fraction
+                <= self.th.pivot_max_residual):
+            d = self._pivot_solution.offset
+            track_list = [v + m @ d for v, m in zip(self._face_track,
+                                                    self._track_matrix)]
+
+        track = (np.cumsum(np.array(track_list), axis=0)
+                 if track_list else np.zeros((1, 3)))
         g_hat = self.g0 / np.linalg.norm(self.g0)
         horizontal = track - np.outer(track @ g_hat, g_hat)
 
