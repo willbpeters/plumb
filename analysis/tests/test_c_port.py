@@ -15,7 +15,6 @@ inputs, which is the only comparison that can catch a faithful-looking
 translation of the wrong formula.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,41 +22,38 @@ import numpy as np
 import pytest
 
 from plumb import quat
-
-FIRMWARE_TEST = Path(__file__).resolve().parents[2] / "firmware" / "test"
-BUILD = FIRMWARE_TEST / "build.sh"
+from tools import cbuild
 
 CASES = 400
 SEED = 20260922
 
 
-def _build(name: str, *flags: str) -> Path | None:
-    """Build the harness, or None when this machine has no C compiler."""
-    exe = FIRMWARE_TEST / name
-    sh = shutil.which("sh") or shutil.which("bash")
-    if sh is None or not BUILD.exists():
-        return None
-    result = subprocess.run([sh, str(BUILD), str(exe), *flags],
-                            capture_output=True, text=True)
-    if result.returncode != 0 or not exe.exists():
-        pytest.fail(f"C harness failed to build:\n{result.stdout}\n{result.stderr}")
-    return exe
+def _build(name: str, *defines: str) -> Path:
+    """Build the harness, skipping loudly if this machine cannot.
+
+    The first version of this shelled out to a build script, which needed `sh`
+    on PATH. Run from PowerShell rather than Git Bash it reported ten silent
+    skips and verified nothing, while reading as a pass. Building through
+    tools/cbuild.py needs no shell, and the skip now says what it means.
+    """
+    try:
+        result = cbuild.build(name, *defines)
+    except cbuild.CompilerNotFound as missing:
+        message = (f"THE C PORT IS NOT VERIFIED HERE: {missing}. "
+                   f"Install a C compiler to run the differential test.")
+        print(f"\n*** {message}")
+        pytest.skip(message)
+    return result.executable
 
 
 @pytest.fixture(scope="session")
 def portcheck():
-    exe = _build("portcheck.exe")
-    if exe is None:
-        pytest.skip("no C compiler on this machine; the port is unverified here")
-    return exe
+    return _build("portcheck.exe")
 
 
 @pytest.fixture(scope="session")
 def portcheck_single():
-    exe = _build("portcheck-single.exe", "-DPLUMB_SINGLE_PRECISION")
-    if exe is None:
-        pytest.skip("no C compiler on this machine")
-    return exe
+    return _build("portcheck-single.exe", "PLUMB_SINGLE_PRECISION")
 
 
 def run_c(exe: Path, lines: list[str]) -> list[list[float]]:

@@ -146,8 +146,11 @@ Two things to know before continuing:
   single-precision and doubles are emulated in software at 896.8 Hz. What is **not** measured is
   what that does across a whole stroke, where the integrator accumulates ~1300 steps. Measure
   that before switching; one ulp per step is not one ulp per stroke.
-- **MSVC is driven directly, not through `vcvars64.bat`**, which hangs in Git Bash here.
-  `firmware/test/build.sh` discovers the toolchain paths itself and falls back to cc/gcc.
+- **The build lives in `analysis/tools/cbuild.py`, not in a shell script.** It discovers the
+  toolchain itself — cc/gcc/clang, else MSVC, which is driven directly because `vcvars64.bat`
+  hangs in Git Bash here. It was a shell script for about an hour, and in that hour running
+  the suite from PowerShell skipped all ten cases silently and read as a pass, because `sh`
+  was not on PATH. Verify the port test actually RAN, not merely that it was green.
 
 **2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
