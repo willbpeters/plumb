@@ -208,6 +208,81 @@ This should be added to the hardware purchasing spec.
 
 ---
 
+## 4a. Decision register — metrics the pipeline computes and throws away
+
+**For Will to review. Fill in the last column; nothing here is decided.**
+
+Grounded in the code rather than in section 1's prose: every row below was checked against
+`analysis/plumb/pipeline.py` on 2026-09-22. `StrokeResult` has exactly four fields —
+`face_angle_deg`, `tempo_ratio`, `path_arc_m`, `path_direction`. Everything else the pipeline
+works out is used once and dropped on the floor.
+
+### First, a gap that is not a v1/v2 question
+
+**Impact speed is missing, and §1.2.1 already committed it to the first build.** That section
+says, in bold, *"Impact speed is therefore not deferred — it is a first-build metric"*, on the
+grounds that it falls out of `v = ω × r` which §7.4 computes anyway. `grep -n speed` over
+`pipeline.py` and `trajectory.py` returns nothing. The per-sample face velocity `v_face` is
+built on every step and discarded.
+
+This is not a feature to weigh — it is v1 by a decision already made, and it is absent. Treat
+it as a defect against §1.2.1 rather than as a candidate.
+
+### Tier A — computed, then discarded on the last line
+
+Zero new arithmetic. These exist as local variables or attributes at the moment the result is
+built, and are simply not returned.
+
+| Metric | Where it already is | Recommend | Your call |
+|---|---|---|---|
+| **Backswing duration** (s) | `pipeline.py:468`, kept only as the tempo numerator | v1 | |
+| **Downswing duration** (s) | `pipeline.py:469`, kept only as the denominator | v1 | |
+| **Net stroke length** (m) | `distance` in `_compute`; computed solely to normalise the forward axis, then thrown away | v1 | |
+| **Shaft lie angle** (°) | `atan2(g0[1], g0[2])` — `g0` is `(0, sin lie, cos lie)` by construction (§7.3) | v1 as a *putter profile* value, not a screen | |
+| **Gyro bias at address** (dps) | `self.bias` | v2, diagnostic screen only | |
+| **Pivot offset, rank, residual** | `self._pivot_solution` | v2, diagnostic screen only — printing this is literally how defect 6 was found | |
+
+Lie angle is worth a second look: it is a **measured property of the putter**, free, and §8's
+per-putter profile currently has no way to obtain it except by being told.
+
+### Tier B — one new stored value, then one line of arithmetic
+
+Each needs the pipeline to keep something it currently lets go, mirroring the existing
+`_impact_track_index`.
+
+| Metric | What it needs | Recommend | Your call |
+|---|---|---|---|
+| **Face rotation rate at impact** (°/s) | `_impact_window` stores `(index, quaternion)`; add ω. Then one dot product with ĝ. | **v1** — see §1.2, no integration at all | |
+| **Total face rotation through stroke** (°) | Track min/max of `twist_angle` per sample; two floats | v1 | |
+| **Backswing / follow-through length** (m) | A transition track index, one integer, exactly like `_impact_track_index` | v2 | |
+| **Length ratio** (follow-through ÷ backswing) | Free once the above exists | **v1 if lengths land** — the ratio largely cancels the pivot error that blocks arc | |
+| **Pause at the top** (ms) | A counter and a definition: samples around transition below the onset threshold | v2 | |
+| **Face-to-path differential** (°) | Path is currently a *string*; needs the angle form of the forward axis | v1 | |
+| **Rise / attack angle at impact** (°) | Store `v_face` at the impact sample | v2 — inherits the path translation error | |
+
+### Tier C — blocked on an open defect, not on a decision
+
+| Metric | Blocked by |
+|---|---|
+| **Arc magnitude** (already reported) | Open defects 4 and 6. Reads 124% of truth at a 5° lie under noise. |
+| **Strike location** (toe/heel, mm) | Open defect 1 (needs >1 kHz) and §5.5 (tap test not run). Section 3.1. |
+| **Estimated roll distance** | §1.2.1, deferred with reasoning that still stands. |
+
+### How to read the recommendations
+
+The v1 picks share one property: **they do not depend on the pivot estimate.** Face rotation
+rate, the timings, total rotation and lie angle are all either direct sensor reads or pure
+integration of the gyro — they are as trustworthy as face angle and tempo, which are the two
+metrics this project has actually proven.
+
+Everything routed to v2 either touches the translation path (and so waits on defect 6) or is a
+diagnostic that belongs behind a developer screen rather than in front of a golfer.
+
+A caution against taking all of the v1 rows: the product decision is **one metric per swipeable
+screen**. Nine screens is a worse product than four. The register is a menu, not a plan.
+
+---
+
 ## 5. Proposed amendments
 
 None applied. In order of value:
@@ -223,6 +298,8 @@ None applied. In order of value:
    handoff.
 4. **§5.4** — note the competitor's 33 g as external corroboration of the mass budget.
 5. **Hardware purchasing spec** — add a SuperStroke Tech Port grip.
-6. **§8** — long putters (armlock, broomstick) change both the lever arm and the pivot offset.
+6. **§1.2.1 / implementation** — impact speed is declared a first-build metric and is not
+   implemented. See §4a. Either build it or amend the claim.
+7. **§8** — long putters (armlock, broomstick) change both the lever arm and the pivot offset.
    The putter profile already exists; note that its parameters have a much wider range than a
    conventional putter implies.
