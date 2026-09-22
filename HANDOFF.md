@@ -88,11 +88,11 @@ experiment confirmed it. It did.
    for free — and converges to 2.4% by the fifth. That is §8.4's per-golfer calibration,
    arrived at from measurement.
 
-   **Still not meeting §3 under noise**, and the reason is now a different defect — see 5.
+   **Still not meeting §3 under noise**, and the reason is now a different defect — see 4.
 3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
    there is 3× margin against the threshold that matters.
-5. **Arc is reported as `ptp(lateral)`, and peak-to-peak of an integrated signal is biased
+4. **Arc is reported as `ptp(lateral)`, and peak-to-peak of an integrated signal is biased
    upward by noise.** A maximum minus a minimum collects the extremes of the random walk, so the
    bias grows as the true arc shrinks. Measured at 0.28 dps over strokes 5–10, arc as a fraction
    of truth:
@@ -106,7 +106,7 @@ experiment confirmed it. It did.
    it. **This is the next piece of offline work on path**, and it needs no hardware: a spread
    statistic that is not a peak-to-peak, or a smooth fit to the track before measuring it.
    Direction classification — what the screen actually shows — is unaffected either way.
-4. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
+5. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
    captures an hour apart on an untouched board: the quietest half-second windows agreed to
    within 10% (0.22 against 0.24 dps), while the worst window went from 0.41 to **1.217 dps —
    over the 0.8 threshold**. Mostly on one axis, so it is mechanical coupling; a cable would do
