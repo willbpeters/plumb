@@ -44,6 +44,29 @@ constexpr uint8_t kRegFifoSmplCntLsb = 0x15;// FIFO sample count, LSB (unit: wor
 constexpr uint8_t kRegFifoStatus = 0x16;    // FIFO status + sample count MSBs
 constexpr uint8_t kRegFifoData = 0x17;      // FIFO data pop register
 constexpr uint8_t kRegStatusInt = 0x2D;     // STATUSINT: CTRL9 CmdDone flag
+constexpr uint8_t kRegStatus0 = 0x2E;       // STATUS0: per-sensor data available
+constexpr uint8_t kRegTimestampLow = 0x30;  // TIMESTAMP_L..H at 0x30..0x32
+constexpr uint8_t kRegResetResult = 0x4D;   // reads 0x80 after a successful reset
+constexpr uint8_t kRegReset = 0x60;         // soft reset (write-only)
+
+// Soft reset. DS-A Table 27: "Write 0xB0 to this register from any modes, will
+// trigger the sensor reset process immediately. The register 0x4D will equals
+// to 0x80 if there is a successful reset."
+constexpr uint8_t kResetCommand = 0xB0;
+constexpr uint8_t kResetResultOk = 0x80;
+
+// --- STATUS0 bits (0x2E), DS-A Table 24 ----------------------------------
+// bits 7:2 reserved, bit 1 gDA, bit 0 aDA: "0: No updates since last read.
+// 1: New data available." This is the direct read path's data-ready signal.
+//
+// Note what STATUS0 does NOT have: an over-run bit. Table 19 calls the
+// register "Output Data Over Run and Data Availability", but the bit table in
+// Table 24 defines only the two availability flags. So the direct path has no
+// hardware loss flag at all -- a sample overwritten before the host read it is
+// only detectable through the TIMESTAMP counter, which is the other reason
+// every direct read carries it.
+constexpr uint8_t kStatus0GyroDataBit = 0x02;  // bit 0, aDA, is not consumed --
+                                               // see dataReady()
 
 // --- CTRL9 host commands (DS-A/DS-09 Table 28, SL's writeCommand()) ------
 constexpr uint8_t kCtrl9CmdAck = 0x00;      // end the CTRL9 handshake
@@ -60,6 +83,39 @@ constexpr uint8_t kFifoStatusWtmBit = 0x40;       // bit 6: watermark reached
 constexpr uint8_t kFifoStatusOvflowBit = 0x20;    // bit 5: overflow happened
 constexpr uint8_t kFifoStatusNotEmptyBit = 0x10;  // bit 4
 constexpr uint8_t kFifoStatusCountMsbMask = 0x03; // bits 1:0: sample count MSBs
+
+// --- CTRL1 (0x02) bit 6, ADDR_AI -----------------------------------------
+// Burst reads either walk the register address or sit on it, and which one you
+// get is a configuration bit this driver never wrote. DS-A section 16.1:
+//
+//   "If ADDR_AI = 0, the register address will not increase... If ADDR_AI = 1,
+//    the register address will automatically increase... Note that the default
+//    value of ADDR_AI is 0, so it is recommended to set it to 1 from beginning,
+//    in case of burst read/write is required."
+//
+// Table 19 confirms CTRL1's reset value is 0b00100000, so ADDR_AI is indeed 0
+// out of reset. The two read paths need opposite settings, which is why this
+// is configured per path rather than once in begin():
+//
+//   FIFO path   ADDR_AI = 0. Every read of FIFO_DATA pops the next byte
+//               (DS-A section 8.8), so a burst that does NOT advance the
+//               address is exactly the documented way to drain it. With
+//               ADDR_AI = 1 the same burst would walk off 0x17 into the
+//               reserved registers above it.
+//   Direct path ADDR_AI = 1. The output registers are twelve consecutive
+//               addresses; without auto-increment a 12-byte burst returns
+//               twelve copies of AX_L, which would decode into plausible
+//               numbers and be wrong in silence -- all six axes equal, and
+//               a standard deviation that means nothing.
+//
+// Bit 5 (BE, byte order) is deliberately left alone. Table 22 gives its reset
+// value as 1, which would mean big-endian, but the FIFO path's measured
+// resting accelerometer magnitude -- 2019 counts against 2048 expected for 1 g
+// at +-16 g full scale -- proves the host interface hands over the low byte
+// first, as this driver's unpacking assumes. Something in that table is
+// inconsistent with the part; read-modify-write means we depend on neither
+// reading of it.
+constexpr uint8_t kCtrl1AddrAiBit = 0x40;
 
 // --- Accelerometer full scale, CTRL2 bits 6:4 (aFS<2:0>) -----------------
 // 000=+-2g 001=+-4g 010=+-8g 011=+-16g. Identical in DS-A, DS-09, and SL
@@ -163,6 +219,12 @@ constexpr uint8_t kFifoSizeSetting128 = 0x03;
 constexpr uint8_t kFifoModeFifo = 0x01;
 constexpr uint8_t kFifoCtrlConfig =
     (uint8_t)((kFifoSizeSetting128 << 2) | kFifoModeFifo);  // 0x0D, rd_mode(bit7)=0
+// Bypass, for the direct read path. Not merely "don't read the FIFO" -- the
+// point of the experiment is that the FIFO is not in the signal path at all,
+// so it cannot be filling, flagging, or being reset behind the measurement.
+constexpr uint8_t kFifoModeBypass = 0x00;
+constexpr uint8_t kFifoCtrlBypass =
+    (uint8_t)((kFifoSizeSetting128 << 2) | kFifoModeBypass);
 
 // FIFO watermark, in samples (FIFO_WTM_TH, 0x13). Half of the 128-sample
 // FIFO: an I/O batching size (I2C burst efficiency vs. latency), not a
@@ -190,7 +252,77 @@ constexpr uint8_t kMaxChunkBytes = 120;
 // blocking forever if the device stops acking.
 constexpr int kCtrl9PollIterations = 50;
 
+// --- Turn-on timing (DS-A Tables 7 and 8) --------------------------------
+// Two different delays, and the difference matters. An earlier note in
+// docs/bringup-results.md recorded this as a single "150 ms turn-on time";
+// the datasheet has two rows.
+//
+// System Turn On Time = 15 ms, in both Table 7 (accel) and Table 8 (gyro),
+// with note 7/8: "System Turn-On Time defines the initialization duration...
+// it starts from about 200us later than the release of POR or the Software
+// Reset." Section 3.3.1 says what it is for: "Normally it takes within about
+// 15ms... for QMI8658C to finish the Initialization and during which, there
+// should be no write/configuration to QMI8658C, to prevent possible
+// interference and failure."
+//
+// That is the intermittent-init defect exactly: begin() ran immediately after
+// Wire.begin(), inside the window the datasheet says not to write in, and the
+// first boot after flashing failed the config read-back while a reset cleared
+// it. Reset-and-wait makes the initial state the same on every boot instead of
+// depending on whether the sensor happened to be power-cycled with the MCU.
+constexpr uint32_t kSystemTurnOnMs = 15;
+
+// Gyro Turn On Time = 150 ms + 3/ODR (Table 8), measured from enabling the
+// gyro. This one is not about configuration succeeding; it is about the data
+// being worth anything. Sampling the gyro inside its 150 ms start-up would put
+// a settling transient into the noise floor measurement, which is the single
+// most consequential number this instrument produces.
+constexpr uint32_t kGyroTurnOnMs = 150;
+
+// --- Direct read path block (DS-A Tables 24-25) --------------------------
+// One burst covers 0x30..0x40: TIMESTAMP_L/M/H, TEMP_L/H, then AX_L..GZ_H.
+// Seventeen bytes instead of twelve, and the five extra are what buy the
+// measurement its integrity:
+//
+//   The timestamp says WHICH sample this is. STATUS0 is polled, and between
+//   the poll and the read a new sample can land -- so without an identity the
+//   host cannot tell a fresh sample from the same one read twice. A duplicate
+//   does not look like corruption; it looks like quiet. It would deflate the
+//   very standard deviation being measured, in the flattering direction.
+//
+// Reading the timestamp in a separate transaction would reintroduce the
+// ambiguity it exists to remove, so it shares the burst with the data.
+constexpr uint8_t kRegGyroZHigh = 0x40;
+constexpr uint8_t kDirectBlockBytes =
+    (uint8_t)(kRegGyroZHigh - kRegTimestampLow + 1);  // 17
+constexpr uint8_t kDirectSampleOffset = 5;  // AX_L, past timestamp(3) + temp(2)
+
+// TIMESTAMP is a 24-bit circular counter (DS-A Table 24): "Count incremented
+// by one for each sample (x, y, z data set) from sensor with highest ODR
+// (circular register 0x0-0xFFFFFF)".
+//
+// MEASURED ON HARDWARE, 2026-09-21, and not in the datasheet: the counter
+// advances ONLY while the FIFO is bypassed. Polled at 20 ms intervals with the
+// FIFO in FIFO mode it read 84 eight times running; in bypass mode, over the
+// same interval, it advanced 19 counts a step. It counts samples written to the
+// OUTPUT REGISTERS, and in FIFO mode the samples go to the FIFO instead.
+//
+// The consequence is not a small one. It means the FIFO path has no way to
+// count what the sensor produced, and therefore no way to measure its own
+// sample loss from the inside: the part offers a latched overflow flag that
+// says loss happened and nothing that says how much. That is why DrainResult
+// carries `sensorCounted` -- an instrument that cannot measure something has
+// to report that, not report a zero.
+constexpr uint32_t kTimestampMask = 0x00FFFFFF;
+
 Rate gCurrentRate = Rate::Stroke;
+ReadPath gCurrentPath = ReadPath::Fifo;
+
+// Sensor TIMESTAMP at the last resetSampleClock(), and the timestamp of the
+// most recent sample handed to a caller. The second is how a re-read of an
+// unchanged sample is rejected rather than reported as data.
+uint32_t gTimestampBase = 0;
+uint32_t gLastTimestamp = 0;
 
 bool writeReg(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(kAddress);
@@ -229,6 +361,72 @@ bool burstReadFifoData(uint8_t* buf, uint8_t n) {
   if (Wire.requestFrom((int)kAddress, (int)n) != n) return false;
   for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
   return true;
+}
+
+// Burst-read `n` consecutive registers starting at `reg`. Requires ADDR_AI=1,
+// so this is only valid on the direct path -- see the ADDR_AI note above.
+bool burstReadRegs(uint8_t reg, uint8_t* buf, uint8_t n) {
+  Wire.beginTransmission(kAddress);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)kAddress, (int)n) != n) return false;
+  for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
+  return true;
+}
+
+// Set or clear CTRL1.ADDR_AI, leaving every other bit of CTRL1 as the part
+// has it -- read-modify-write rather than a whole-byte constant, so this
+// cannot silently change the byte order bit or the FIFO interrupt mapping.
+bool setAddrAutoIncrement(bool enable) {
+  uint8_t ctrl1 = 0;
+  if (!readReg(kRegCtrl1, ctrl1)) return false;
+  const uint8_t wanted = enable ? (uint8_t)(ctrl1 | kCtrl1AddrAiBit)
+                                : (uint8_t)(ctrl1 & (uint8_t)~kCtrl1AddrAiBit);
+  if (wanted == ctrl1) return true;
+  return writeVerified(kRegCtrl1, wanted);
+}
+
+// Read the 24-bit TIMESTAMP counter with single-register reads, so it works on
+// either read path regardless of ADDR_AI.
+//
+// Three separate reads can straddle an increment: read L as 0xFF, the counter
+// increments, and M comes back already carried, producing a value 256 too
+// high. Re-reading L detects any increment during the window -- not just the
+// carries -- and a retry costs four register reads on a counter that is read
+// once per drain. Without this, roughly one drain in four thousand would
+// report a phantom 256-sample gap, which is precisely the kind of number that
+// gets believed.
+bool readTimestamp(uint32_t& out) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint8_t low = 0, mid = 0, high = 0, lowAgain = 0;
+    if (!readReg(kRegTimestampLow, low)) return false;
+    if (!readReg((uint8_t)(kRegTimestampLow + 1), mid)) return false;
+    if (!readReg((uint8_t)(kRegTimestampLow + 2), high)) return false;
+    if (!readReg(kRegTimestampLow, lowAgain)) return false;
+    if (lowAgain == low) {
+      out = (uint32_t)low | ((uint32_t)mid << 8) | ((uint32_t)high << 16);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Samples produced since the last resetSampleClock(). Unsigned arithmetic
+// masked to 24 bits, so the counter's wrap is handled rather than noticed.
+uint32_t producedSince(uint32_t timestamp) {
+  return (timestamp - gTimestampBase) & kTimestampMask;
+}
+
+// Little-endian int16 pairs, in the order the part emits them: AX, AY, AZ,
+// GX, GY, GZ. The same layout serves both paths -- DS-A section 8.9 gives it
+// for the FIFO, Table 25 for the output registers.
+void unpackSample(const uint8_t* b, Sample& s) {
+  s.ax = (int16_t)((uint16_t)b[1] << 8 | b[0]);
+  s.ay = (int16_t)((uint16_t)b[3] << 8 | b[2]);
+  s.az = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+  s.gx = (int16_t)((uint16_t)b[7] << 8 | b[6]);
+  s.gy = (int16_t)((uint16_t)b[9] << 8 | b[8]);
+  s.gz = (int16_t)((uint16_t)b[11] << 8 | b[10]);
 }
 
 // Send a CTRL9 host command and run the documented handshake (DS-A/DS-09
@@ -289,48 +487,163 @@ bool configureOdr(Rate rate) {
   return true;
 }
 
+// Everything that differs between the two read paths, in one place: burst
+// address behaviour, and whether the FIFO is in the signal path at all.
+bool configureReadPath(ReadPath path) {
+  if (!setAddrAutoIncrement(path == ReadPath::Direct)) return false;
+
+  if (path == ReadPath::Direct) {
+    // Bypass. No watermark to reach, no read mode to enter, nothing to reset.
+    return writeVerified(kRegFifoCtrl, kFifoCtrlBypass);
+  }
+
+  if (!writeVerified(kRegFifoWtmTh, kFifoWatermarkSamples)) return false;
+  if (!writeVerified(kRegFifoCtrl, kFifoCtrlConfig)) return false;
+  return sendCtrl9Command(kCtrl9CmdRstFifo);
+}
+
 }  // namespace
 
 namespace qmi8658 {
 
-bool begin(Rate rate) {
+bool begin(Rate rate, ReadPath path) {
+  // Soft reset first, so the part starts from the same state on every boot.
+  // The MCU resets without power-cycling the sensor, which left begin()
+  // configuring a part in whatever state the previous run had put it in --
+  // the likely other half of the intermittent first-boot failure. A write to
+  // the reset register cannot be read back to verify it (it is write-only and
+  // self-clearing), so it is confirmed the way the datasheet says to confirm
+  // it: 0x4D reads 0x80 after a successful reset.
+  //
+  // 0x4D is a general purpose register that "could be overwritten after later
+  // operations, like enabling the sensor(s)" (DS-A 7.4), so it is checked
+  // here, before anything else is configured, and never again.
+  if (!writeReg(kRegReset, kResetCommand)) return false;
+  delay(kSystemTurnOnMs);
+
+  uint8_t resetResult = 0;
+  if (!readReg(kRegResetResult, resetResult)) return false;
+  if (resetResult != kResetResultOk) return false;
+
   uint8_t who = 0;
   if (!readReg(kRegWhoAmI, who)) return false;
   if (who != kWhoAmIValue) return false;
 
   if (!configureOdr(rate)) return false;
   if (!writeVerified(kRegCtrl7, kCtrl7EnableAccelGyro)) return false;
-  if (!writeVerified(kRegFifoWtmTh, kFifoWatermarkSamples)) return false;
-  if (!writeVerified(kRegFifoCtrl, kFifoCtrlConfig)) return false;
+  // Gyro start-up. Everything after this point may be read; nothing sampled
+  // before it should be believed.
+  delay(kGyroTurnOnMs);
 
-  // Start from a known-empty FIFO (CTRL_CMD_RST_FIFO clears data, sample
-  // count and flags -- DS-A/DS-09 §5.10.6.2). This is a CTRL9 command, not
-  // a directly-writable register, so it goes through sendCtrl9Command
-  // rather than writeVerified.
-  if (!sendCtrl9Command(kCtrl9CmdRstFifo)) return false;
+  gCurrentPath = path;
+  if (!configureReadPath(path)) return false;
 
   gCurrentRate = rate;
-  return true;
+  return resetSampleClock();
 }
 
 bool setRate(Rate rate) {
   if (!configureOdr(rate)) return false;
+  // The gyro is being restarted at a new rate and its output is not
+  // trustworthy until it has settled -- the same 150 ms as begin().
+  delay(kGyroTurnOnMs);
   // Samples already queued at the old rate would corrupt the time base --
   // start clean at the new rate.
-  if (!sendCtrl9Command(kCtrl9CmdRstFifo)) return false;
+  if (!configureReadPath(gCurrentPath)) return false;
   gCurrentRate = rate;
+  return resetSampleClock();
+}
+
+bool setReadPath(ReadPath path) {
+  const ReadPath previous = gCurrentPath;
+  gCurrentPath = path;
+  if (!configureReadPath(path)) {
+    gCurrentPath = previous;
+    return false;
+  }
+  return resetSampleClock();
+}
+
+bool resetSampleClock() {
+  if (gCurrentPath == ReadPath::Fifo) {
+    // No sample clock to re-base -- the counter is frozen while the FIFO is
+    // enabled. Anything already queued was produced before the capture began
+    // and would be counted against a window it does not belong to, so clear
+    // it and leave the base at zero.
+    gTimestampBase = 0;
+    gLastTimestamp = 0;
+    return sendCtrl9Command(kCtrl9CmdRstFifo);
+  }
+
+  uint32_t timestamp = 0;
+  if (!readTimestamp(timestamp)) return false;
+  gTimestampBase = timestamp;
+  gLastTimestamp = timestamp;
   return true;
 }
 
 bool dataReady() {
+  if (gCurrentPath == ReadPath::Direct) {
+    uint8_t status = 0;
+    if (!readReg(kRegStatus0, status)) return false;
+    // gDA only. Accelerometer and gyroscope run at a common ODR -- they must,
+    // to share the FIFO (DS-A 8.2) -- so one sample event sets both flags.
+    // Testing the gyro's is testing the sample's, and the gyro is the channel
+    // every number this instrument exists to measure comes from.
+    return (status & kStatus0GyroDataBit) != 0;
+  }
+
   uint8_t status = 0;
   if (!readReg(kRegFifoStatus, status)) return false;
   return (status & kFifoStatusWtmBit) != 0;
 }
 
+// Direct path: one poll, one sample, and no buffer between the sensor and the
+// bus.
+//
+// The output registers hold only the newest sample, so this keeps up only
+// while the whole per-sample cycle fits inside one ODR period. At stroke rate
+// that is 1.115 ms against roughly 500 us of bus time -- a 3-byte STATUS0 poll
+// and an 18-byte block read at 400 kHz -- so it fits with room to spare. At
+// maximum rate the period is 139 us and it cannot fit at all: the tap test
+// keeps the FIFO, and this is a stroke-rate path. Nothing here enforces that.
+// The timestamp reports it.
+DrainResult drainDirect(Sample* out) {
+  DrainResult result{0, false, 0, true};
+
+  uint8_t block[kDirectBlockBytes];
+  if (!burstReadRegs(kRegTimestampLow, block, kDirectBlockBytes)) return result;
+
+  const uint32_t timestamp = (uint32_t)block[0] | ((uint32_t)block[1] << 8) |
+                             ((uint32_t)block[2] << 16);
+  result.produced = producedSince(timestamp);
+
+  // Same sample as last time: STATUS0 said "new data" but the data has not
+  // changed, so this is a re-read, not a measurement. Reporting it as a sample
+  // would be reporting the instrument's own polling as sensor behaviour, and
+  // duplicated samples pull a standard deviation DOWN -- the direction that
+  // would look like success.
+  if (timestamp == gLastTimestamp) return result;
+  gLastTimestamp = timestamp;
+
+  unpackSample(block + kDirectSampleOffset, out[0]);
+  result.count = 1;
+  return result;
+}
+
 DrainResult drain(Sample* out, uint8_t capacity) {
-  DrainResult result{0, false};
+  DrainResult result{0, false, 0, false};
   if (out == nullptr || capacity == 0) return result;
+
+  if (gCurrentPath == ReadPath::Direct) return drainDirect(out);
+
+  // No produced count on this path. The obvious fix for "dropped: 0 alongside
+  // overflow on 224 of 225 batches" was to number samples from the sensor's
+  // TIMESTAMP counter instead of from the delivered count -- but the counter
+  // is frozen while the FIFO is enabled (see the note on kTimestampMask), so
+  // there is nothing to number them from. `sensorCounted` stays false, and the
+  // caller numbers this path's samples by what it has been handed, which is
+  // all anyone can honestly claim about them.
 
   uint8_t status = 0;
   if (!readReg(kRegFifoStatus, status)) return result;
@@ -400,13 +713,7 @@ DrainResult drain(Sample* out, uint8_t capacity) {
 
   const uint8_t samplesRead = (uint8_t)(got / kBytesPerSample);
   for (uint8_t i = 0; i < samplesRead; i++) {
-    const uint8_t* b = staging + (uint16_t)i * kBytesPerSample;
-    out[i].ax = (int16_t)((uint16_t)b[1] << 8 | b[0]);
-    out[i].ay = (int16_t)((uint16_t)b[3] << 8 | b[2]);
-    out[i].az = (int16_t)((uint16_t)b[5] << 8 | b[4]);
-    out[i].gx = (int16_t)((uint16_t)b[7] << 8 | b[6]);
-    out[i].gy = (int16_t)((uint16_t)b[9] << 8 | b[8]);
-    out[i].gz = (int16_t)((uint16_t)b[11] << 8 | b[10]);
+    unpackSample(staging + (uint16_t)i * kBytesPerSample, out[i]);
   }
   result.count = samplesRead;
 

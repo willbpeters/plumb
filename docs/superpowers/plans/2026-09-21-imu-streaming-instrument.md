@@ -68,7 +68,7 @@ Both the firmware encoder and the host decoder implement this. It is written onc
 | 0 | 2 | Sync | `0xA5 0x5A` |
 | 2 | 4 | `first_seq` | uint32, sequence number of the first sample in this batch |
 | 6 | 1 | `count` | uint8, number of samples, 1–64 |
-| 7 | 1 | `flags` | bit 0 = FIFO overflow since last batch; other bits reserved, zero |
+| 7 | 1 | `flags` | bit 0 = FIFO overflow since last batch; bit 1 = `first_seq` came from the sensor's own TIMESTAMP counter rather than from a count of what was delivered (added 2026-09-21 with the direct read path — the two mean different things and a gap in each means a different thing); other bits reserved, zero |
 | 8 | 4 | `drain_micros` | uint32, `micros()` when the MCU drained the FIFO |
 | 12 | 12 × `count` | samples | Six int16: `ax, ay, az, gx, gy, gz` |
 | 12 + 12×count | 1 | checksum | XOR of every byte from offset 2 up to but not including the checksum |

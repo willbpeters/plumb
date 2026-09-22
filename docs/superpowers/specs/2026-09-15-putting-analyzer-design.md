@@ -194,7 +194,7 @@ an alignment stick if they want one.
 | PSRAM | **2 MB quad-SPI** | Fonts and image assets only — not framebuffers |
 | Flash | 16 MB | ~2 MB application, ~13 MB LittleFS stroke log |
 | Display | 240×240 round, GC9A01 over SPI | 80 MHz, DMA |
-| IMU | QMI8658 6-axis, I²C @ 400 kHz on GPIO6/7 | FIFO batched, INT on GPIO3/4 |
+| IMU | QMI8658 6-axis, I²C @ 400 kHz on GPIO6/7 | Output registers polled, INT on GPIO3/4 (§6.4, amended) |
 | Touch | CST816S, shares the I²C bus | Polled only outside the stroke window |
 | Battery sense | GPIO1, 200 K/100 K divider | `V = 3.3/4096 × 3 × adc` |
 | Charger | ETA6096 over USB-C | Charge current must be ≤1C for the fitted cell; verified against the board schematic at bring-up |
@@ -378,11 +378,46 @@ resolution per buffer, double-buffered, is followed.
   ±256 while converting counts at ±250 would have made every recovered rate 2.4%
   low: a systematic scale error in every integrated angle, invisible without a
   reference. `FullScale` in `analysis/plumb/sensor.py` is amended to match.
-- **FIFO batching is mandatory.** A 12-byte burst read costs ~325 µs on a 400 kHz I²C bus;
-  polling single samples at 500 Hz consumes ~16% of the bus and a great deal of CPU. Batched
-  FIFO reads triggered by the QMI8658 interrupt reduce this by an order of magnitude.
+- **Stroke acquisition polls the output registers directly. The FIFO is not used during a
+  stroke.**
+
+  *Amended 2026-09-21 (second amendment to this section).* This previously read "FIFO batching
+  is mandatory", justified by a 12-byte burst read costing ~325 µs on a 400 kHz bus, single-sample
+  polling consuming ~16% of it, and batching reducing that "by an order of magnitude". The
+  arithmetic does not hold and the hardware disagrees.
+
+  The arithmetic: batching reduces *transaction overhead*, not *data volume*, and at 12 bytes per
+  sample the volume dominates. 896.8 Hz × 12 B is ~25% of a 400 kHz bus however it is read.
+  Direct polling costs more — ~44%, from an 18-byte block read plus a 3-byte status poll — but
+  not an order of magnitude more, and I²C on this part is capped at 400 kHz (datasheet rev A,
+  Table 38), so the difference cannot be bought back with bus speed.
+
+  The hardware, measured on the board over 60 s at rest, both paths back to back:
+
+  | | Direct registers | FIFO |
+  |---|---|---|
+  | Samples delivered | 54720 | 42560 |
+  | Sensor ODR, measured | **906.86 Hz** | not measurable — see below |
+  | Delivered rate | 906.86 Hz | 707.80 Hz, **21.9% below** what the sensor produced |
+  | Samples lost | **0** | overflow flag set on 665 of 665 batches |
+  | Resting gyro σ, worst axis | **0.2765 dps** | 0.3405 dps, and varying with position in the batch |
+
+  Three reasons the FIFO loses that fifth, all from the datasheet and all confirmed on hardware.
+  FIFO read mode suspends acquisition — FIFO_CTRL bit 7 "must be cleared again after the data read
+  is complete *so that writing data to the FIFO can resume*" — so every microsecond spent draining
+  is samples the part never stores. The loss fraction depends only on ODR and bus clock, so no
+  watermark helps. And the TIMESTAMP counter does not advance while the FIFO is enabled, which
+  means the FIFO path cannot count what it lost: it reports that loss happened and never how much.
+
+  **What this does not solve: the §5.5 tap test.** Direct polling costs ~500 µs per sample against
+  a 139 µs period at the 7174.4 Hz maximum ODR, so it cannot service the rate the tap test needs,
+  and the FIFO cannot deliver uniformly sampled data for an FFT. The tap test remains blocked. The
+  untried option is 1793.6 Hz — Nyquist 896 Hz, enough to see the resonance §5.5 looks for — with
+  the timestamp block dropped from the read to buy headroom.
 - **Touch polling is suspended between arm and follow-through completion.** The CST816S shares
-  the I²C bus and would otherwise steal bus time during the measurement window.
+  the I²C bus and would otherwise steal bus time during the measurement window. This tightens
+  under direct polling: the margin at 896.8 Hz is ~56% of the sample period, and a sample missed
+  is a sample gone — there is no buffer to absorb a late read.
 
 Accelerometer saturation at impact is expected and acceptable. Impact is used as a trigger,
 not as a measurement; a clipped spike is a cleaner edge than an unclipped one.
@@ -634,7 +669,7 @@ The corpus is dumped over USB and is the input to the Python development workflo
 | Mount compliance corrupts angular measurement | Project fails its accuracy target | Tap test in Phase 1 (§5.5); escalate to shaft-bore collet |
 | Grip butt caps sealed or non-round | Base does not fit study putters | Compatibility survey before base geometry is frozen (§5.6) |
 | Accelerometer correction drags attitude during stroke | Systematic face-angle error | Correction gain near zero during stroke window (§7.2) |
-| I²C bus contention at 500 Hz | Sampling jitter | FIFO batching, touch polling suspended (§6.4) |
+| I²C bus contention at 896.8 Hz | Sampling jitter, or a lost sample | Direct polling, touch and display suspended (§6.4) |
 | Path accuracy unattainable via double integration | One of three metrics unreliable | Direction classification is the primary output; arc magnitude secondary (§7.4) |
 | Motion capture access not granted | No gold-standard reference | SAM PuttLab fallback (§10.2) |
 | Reverse battery polarity | Board destroyed | Meter before first connection (§4.4) |

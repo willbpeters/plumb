@@ -10,14 +10,17 @@ import struct
 
 import pytest
 
-from tools.capture import SYNC, Batch, decode_batches, parse_csv_line
+from tools.capture import (SYNC, Batch, decode_batches, parse_csv_line,
+                           parse_streaming_state)
 
 
-def build_frame(first_seq, samples, overflow=False, drain_micros=12345):
+def build_frame(first_seq, samples, overflow=False, drain_micros=12345,
+                sensor_seq=False):
     """Hand-build a frame to the spec in the plan. Deliberately does NOT reuse
     the decoder's constants beyond the sync word -- a test that shares an
     encoder with the code under test proves only that it is self-consistent."""
-    body = struct.pack("<IBBI", first_seq, len(samples), 1 if overflow else 0, drain_micros)
+    flags = (1 if overflow else 0) | (2 if sensor_seq else 0)
+    body = struct.pack("<IBBI", first_seq, len(samples), flags, drain_micros)
     for s in samples:
         body += struct.pack("<6h", *s)
     checksum = 0
@@ -125,3 +128,102 @@ def test_measured_odr_uses_first_and_last_drain_timestamps():
 
 def test_measured_odr_is_none_before_two_batches():
     assert CaptureStats().measured_odr_hz() is None
+
+
+def test_a_repeated_sequence_number_is_counted_not_hidden():
+    """The direct read path polls a data-ready flag and then reads the output
+    registers, so a sample can be read twice if the flag is misread. Firmware
+    rejects duplicates by timestamp, but if one ever reaches the host it must
+    not pass as data: duplicates pull a standard deviation DOWN, which is the
+    direction that looks like a good result."""
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 100, [(0,) * 6] * 4))
+    accumulate(stats, Batch(2, False, 200, [(0,) * 6] * 4))
+    assert stats.repeats == 2
+    assert stats.dropped == 0
+
+
+def test_produced_and_delivered_rates_separate_the_sensor_from_the_link():
+    """Sequence numbers count what the sensor produced; the sample count counts
+    what arrived. With a fifth of the samples lost in the part, those are
+    different numbers, and only the first one is the ODR."""
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 0, [(0,) * 6] * 100, sensor_seq=True))
+    accumulate(stats, Batch(900, False, 1_000_000, [(0,) * 6] * 100, sensor_seq=True))
+    assert stats.dropped == 800
+    assert stats.measured_odr_hz() == pytest.approx(100.0, rel=1e-3)
+    assert stats.produced_odr_hz() == pytest.approx(900.0, rel=1e-3)
+
+
+def test_produced_rate_equals_delivered_rate_when_nothing_is_lost():
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 0, [(0,) * 6] * 500, sensor_seq=True))
+    accumulate(stats, Batch(500, False, 1_000_000, [(0,) * 6] * 500, sensor_seq=True))
+    assert stats.produced_odr_hz() == pytest.approx(stats.measured_odr_hz(), rel=1e-9)
+
+
+def test_produced_odr_is_none_before_two_batches():
+    assert CaptureStats().produced_odr_hz() is None
+
+
+def test_sensor_sequence_flag_is_surfaced():
+    """Two different quantities share the sequence field, and which one it is
+    changes what a gap means. The flag is the only thing that says which."""
+    direct, _ = decode_batches(build_frame(0, [(0,) * 6], sensor_seq=True))
+    fifo, _ = decode_batches(build_frame(0, [(0,) * 6], sensor_seq=False))
+    assert direct[0].sensor_seq is True
+    assert fifo[0].sensor_seq is False
+
+
+def test_overflow_and_sensor_sequence_flags_are_independent():
+    batches, _ = decode_batches(
+        build_frame(0, [(0,) * 6], overflow=True, sensor_seq=True))
+    assert batches[0].overflow is True
+    assert batches[0].sensor_seq is True
+
+
+def test_no_sensor_ODR_is_reported_when_the_sequence_is_only_a_delivered_count():
+    """On the FIFO path the sensor's sample counter is frozen, so sequence
+    numbers count what arrived. Dividing that by elapsed time would produce a
+    number that looks like an ODR and is really just the delivery rate again --
+    the same kind of claim as the "dropped: 0" that hid 20 percent loss."""
+    stats = CaptureStats()
+    accumulate(stats, Batch(0, False, 0, [(0,) * 6] * 500))
+    accumulate(stats, Batch(500, False, 1_000_000, [(0,) * 6] * 500))
+    assert stats.measured_odr_hz() == pytest.approx(500.0, rel=1e-3)
+    assert stats.produced_odr_hz() is None
+
+
+def test_streaming_state_is_read_from_the_status_line():
+    """The board's start/stop command is a toggle, and a script cannot see
+    which way it will go -- the previous capture may have left it streaming.
+    Asking rather than assuming is the difference between a 20-second capture
+    and 0.6 seconds of stale frames, which is what a blind toggle produced."""
+    nl = chr(10)
+    assert parse_streaming_state(
+        "# format=binary rate=stroke(896.8 Hz) path=direct streaming=1" + nl) is True
+    assert parse_streaming_state(
+        "# format=csv rate=stroke(896.8 Hz) path=fifo streaming=0" + nl) is False
+
+
+def test_streaming_state_is_unknown_when_the_status_line_has_not_arrived():
+    assert parse_streaming_state("") is None
+    assert parse_streaming_state("# ready -- press s to start") is None
+
+
+def test_streaming_state_is_found_amid_binary_frame_bytes():
+    """Status is asked for while frames are in flight, so the line arrives
+    surrounded by binary."""
+    noise = bytes([0xA5, 0x5A, 0x01, 0x02]).decode("utf-8", "replace")
+    assert parse_streaming_state(noise + "streaming=1" + chr(10) + noise) is True
+
+
+def test_a_trailing_byte_is_only_kept_when_it_could_start_a_sync_word():
+    """Leftover is fed back in on the next read, so a byte that cannot begin a
+    frame must not be kept: it would be rescanned forever and the buffer would
+    creep upward for the whole capture."""
+    batches, leftover = decode_batches(bytes([0x11, 0x22, 0x33]))
+    assert batches == []
+    assert leftover == b""
+    batches, leftover = decode_batches(bytes([0x11, 0x22]) + SYNC[:1])
+    assert leftover == SYNC[:1]

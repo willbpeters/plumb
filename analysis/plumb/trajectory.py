@@ -19,10 +19,18 @@ from plumb import quat
 # binding accuracy constraint and tempo error scales with sample resolution
 # (parent spec 6.4, amended 2026-09-21).
 #
-# Still nominal, not measured. MEMS oscillators run a few percent off, and that
-# error goes straight into every integrated angle. Task 8 of the bring-up plan
-# measures the achieved rate on the real board; this constant and every number
-# in README.md get re-baselined on it.
+# Nominal, and deliberately still nominal now that the real rate is known.
+#
+# The board measures 906.86 Hz -- 1.12% high, repeatable to +/-0.01 Hz across
+# five captures, taken from the sensor's own sample counter against the MCU
+# clock (docs/bringup-results.md). MEMS oscillators do run a few percent off,
+# and that error goes straight into every integrated angle.
+#
+# It is not moved to 906.86 because that is THIS board's oscillator, not the
+# part's. Putting one unit's calibration into a shared constant would trade a
+# known 1.12% error for a hidden one of unknown size on every other unit. The
+# decision that actually resolves it -- per-unit calibration, or firmware that
+# measures its own rate at startup, which it now can -- is open and is Will's.
 SAMPLE_RATE_HZ = 896.8
 
 

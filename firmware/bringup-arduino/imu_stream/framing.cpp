@@ -4,6 +4,7 @@ namespace {
 constexpr uint8_t kSync0 = 0xA5;
 constexpr uint8_t kSync1 = 0x5A;
 constexpr uint8_t kFlagOverflow = 0x01;
+constexpr uint8_t kFlagSensorSeq = 0x02;  // seq comes from the sensor's counter
 
 // Accumulate the checksum over everything after the sync word, exactly as
 // capture.py does. Writing the bytes and the checksum in one pass keeps the two
@@ -30,14 +31,16 @@ void stream::emitCsv(Stream& out, uint32_t firstSeq, const Sample* s, uint8_t co
 }
 
 void stream::emitBinary(Stream& out, uint32_t firstSeq, const Sample* s,
-                         uint8_t count, bool overflow, uint32_t drainMicros) {
+                         uint8_t count, bool overflow, bool sensorSeq,
+                         uint32_t drainMicros) {
   out.write(kSync0);
   out.write(kSync1);
 
   ChecksumWriter w{out};
   w.write32(firstSeq);
   w.write(count);
-  w.write(overflow ? kFlagOverflow : 0);
+  w.write((uint8_t)((overflow ? kFlagOverflow : 0) |
+                    (sensorSeq ? kFlagSensorSeq : 0)));
   w.write32(drainMicros);
   for (uint8_t i = 0; i < count; i++) {
     w.write16(s[i].ax); w.write16(s[i].ay); w.write16(s[i].az);

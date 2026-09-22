@@ -88,9 +88,18 @@ The exact ODR values the QMI8658 supports are read from the datasheet at impleme
 recorded in the driver as named constants. They are **not** guessed here, and the nominal value
 is not trusted in any case — §9 requires the achieved rate to be measured.
 
-**FIFO batching is mandatory** (§6.4). A 12-byte burst read costs roughly 325 µs on a 400 kHz
-I²C bus; polling single samples at 500 Hz would consume about 16% of the bus. The FIFO watermark
-interrupt drives batch drains, on the INT line identified in §4.2.
+**Two read paths, selectable at runtime.** This originally read "FIFO batching is mandatory
+(§6.4)", on the parent spec's bus-cost argument.
+
+*Amended 2026-09-21.* The instrument now offers both the FIFO path and a direct-register path
+(poll STATUS0, burst-read the output registers, FIFO bypassed), because the choice between them
+was exactly what could not be settled by argument. Measured back to back over 60 s, the direct
+path delivered every sample the sensor produced and the FIFO path lost 21.9% of them; parent
+spec §6.4 is amended accordingly, with the numbers. Keeping both in the instrument is what made
+the comparison possible and is what will show whether a future FIFO fix works.
+
+The direct path cannot service the maximum ODR — ~500 µs per sample against a 139 µs period — so
+the tap test (§9.5) still needs the FIFO, or a lower rate. See §6.4 of the parent spec.
 
 ## 5. What "jitter" means here, and what it does not
 

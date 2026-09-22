@@ -17,14 +17,16 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 
 | Criterion | Status |
 |---|---|
-| §9.1 Axes and signs | **not done** |
-| §9.2 Dropped samples | **FAIL** — ~20% of samples lost in the FIFO |
-| §9.3 Measured ODR | **blocked** by §9.2 |
-| §9.4 Resting gyro noise | **upper bound only** — 2.17 dps, see caveats |
-| §9.5 Tap test | **blocked** — needs a printed base, and §9.2 first |
+| §9.1 Axes and signs | **not done** — needs the board rotated by hand |
+| §9.2 Dropped samples | **PASS on the direct read path** — 54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear throughout. Still fails on the FIFO path (21.9% lost) |
+| §9.3 Measured ODR | **stroke rate done: 906.86 Hz**, against 896.8 nominal. Maximum rate not measured |
+| §9.4 Resting gyro noise | **measured: 0.2765 dps** worst axis, against a 0.8 dps stillness threshold |
+| §9.5 Tap test | **blocked** — needs a printed base, and neither read path can deliver uniformly sampled data above 1 kHz |
 
-Two defects found, one fixed. The instrument is not yet trustworthy for any
-time-dependent measurement.
+Read the sections in order: the 2026-09-21 morning session found the FIFO
+defects, the later session read the datasheet, and the final section is the
+direct-register experiment that settled it. Where the later sections correct
+the earlier ones, they say so.
 
 ---
 
@@ -289,3 +291,239 @@ change and it is decisive:
   raising instead.
 
 Either outcome is actionable, which is what makes it the right next experiment.
+
+---
+
+# Direct register read path (2026-09-21, third session)
+
+The experiment the previous section called for. Both read paths measured back
+to back on the same board, at rest on the same surface, 60 seconds each, with
+nothing between them but a serial command. Whatever the desk and the room were
+doing, they were doing it to both.
+
+Reproduce with, from `analysis/`:
+
+```
+uv run python tools/capture.py --port COM4 --seconds 60 --read-path direct --out rest_direct.npy
+uv run python tools/capture.py --port COM4 --seconds 60 --read-path fifo   --out rest_fifo.npy
+uv run python tools/rest_noise.py rest_direct.npy --odr 906.86
+uv run python tools/rest_noise.py rest_fifo.npy   --odr 707.80 --batch 64
+```
+
+The `.npy` captures themselves are gitignored as capture artefacts, so the
+numbers below are the record. They reproduced to within one sample across five
+repeats of the direct capture.
+
+## The answer
+
+| | Direct registers | FIFO |
+|---|---|---|
+| Samples delivered in 60 s | 54720 | 42560 |
+| Batches | 54720 (one sample each) | 665 (64 each) |
+| Sequence gaps | **0** | 0 frames lost host-side; in-part loss not measurable |
+| Duplicated samples | **0** | not measurable |
+| Overflow flag | never set | set on **665 of 665** batches |
+| Delivered rate | 906.86 Hz | 707.80 Hz |
+| Sensor ODR | **906.86 Hz** | frozen counter, cannot be measured |
+| Loss against what the sensor produced | **0%** | **21.9%** |
+
+The FIFO's 21.9% is computed against the 906.86 Hz the direct path measured,
+not against nominal. The earlier figure of 20.8% used the 896.8 Hz nominal rate
+and was therefore slightly optimistic; the mechanism and the magnitude stand.
+
+**The FIFO read path was the fault.** Both outcomes the previous section
+predicted were on the table, and the first one won.
+
+## Resting gyro noise (section 9.4) - measured
+
+Board at rest, 60 s, stroke rate, gyro LPF enabled at mode 00.
+
+| Axis | Direct sigma (dps) | Direct robust sigma | raw/robust | FIFO sigma (dps) |
+|---|---|---|---|---|
+| X | **0.2765** | 0.2548 | 1.09 | 0.3405 |
+| Y | 0.2609 | 0.2432 | 1.07 | 0.3152 |
+| Z | 0.2315 | 0.2201 | 1.05 | 0.2489 |
+
+**Worst-axis sigma = 0.2765 dps against a `stillness_gyro_std_rad` threshold of
+0.8 dps.** That is the number section 9.4 exists to produce, and it clears the
+threshold with room to spare, which means the stroke detector can work on this
+board.
+
+Two things make this a floor rather than another upper bound:
+
+1. **raw/robust is 1.05 to 1.09.** The earlier 2.17 dps measurement had a ratio
+   of 1.4, a heavy tail consistent with real mechanical disturbance. This
+   distribution has essentially no tail: the estimator that ignores outliers and
+   the one that does not now agree.
+2. **Half-second windows barely vary.** Over 120 windows the worst-axis sigma
+   runs min 0.2207, median 0.2842, max 0.4109. If the room were the dominant
+   contributor the minimum would sit far below the median. It does not.
+
+It is still **3 to 4 times the datasheet-typical figure**: 15 mdps/sqrt(Hz) over
+the LPF's ~24 Hz bandwidth predicts 0.074 dps, or 0.092 if the filter's
+equivalent noise bandwidth is reckoned as first-order. Unexplained, and not
+worth chasing while there is a 2.9x margin against the threshold that matters.
+Quantisation is not the explanation: one count is 0.0078 dps, so sigma is 35
+counts.
+
+## Measured ODR (section 9.3) - 906.86 Hz, and it is not nominal
+
+906.86 Hz against 896.8 Hz nominal: **1.12% high**, repeatable to +/-0.01 Hz
+across five separate 20 to 60 s captures. Measured from the sensor's own
+TIMESTAMP counter against the MCU's `micros()`, so it is the part's real output
+rate rather than a delivery rate.
+
+This is exactly the error section 5 of the instrument spec was written to catch,
+and it is larger than the example that section used. **A 1.12% scale error goes
+straight into every integrated angle** - 1.8 degrees of face rotation would be
+reported as 1.78 - and no downstream filtering removes it.
+
+It is also a property of this board's MEMS oscillator rather than of the part
+number, so it does not transfer to another unit. **This is a decision for
+Will.** `SAMPLE_RATE_HZ` in `analysis/plumb/trajectory.py` is left at its
+nominal 896.8, because baking one board's oscillator into a shared constant
+would be worse than leaving it nominal. The real options are a per-unit ODR
+calibration, or having the firmware measure its own rate at startup - which it
+can now do in about ten lines, since the counter exists and works.
+
+## Position within the batch (defect 5) - smaller than recorded, and still real
+
+Sigma by position within the FIFO path's 64-sample batches, 665 batches:
+
+| Samples | gx | gy | gz |
+|---|---|---|---|
+| 0-7 | 0.3576 | 0.3159 | 0.2498 |
+| 8-15 | 0.3439 | 0.3011 | 0.2356 |
+| 16-23 | **0.2677** | 0.2415 | 0.2052 |
+| 24-31 | 0.2712 | 0.2451 | 0.2152 |
+| 32-39 | 0.3579 | 0.3283 | 0.2572 |
+| 40-47 | 0.3619 | 0.3465 | 0.2675 |
+| 48-55 | 0.3547 | 0.3442 | 0.2700 |
+| 56-63 | 0.3681 | 0.3600 | 0.2771 |
+
+The spread is 1.4x, not the 3x recorded earlier (0.37 early against 1.0 to 1.34
+late). It is not noise - with 5320 samples per group the standard error on sigma
+is 0.003, so 0.268 against 0.368 is a 30-sigma difference - and a stationary
+sensor cannot have noise that depends on where in a transfer a sample sat. So
+the effect is real and it belongs to the transfer.
+
+**Why the earlier figure was larger is not established.** The likeliest
+explanation is the capture defect found in this session (below): the earlier
+number was measured with a pipeline that could silently splice in stale frames
+from a previous run, and the counter that would have caught it did not exist
+yet. Treat the 3x as unreliable rather than as something that was fixed. The
+1.4x is what today's measurement supports.
+
+## New finding - the TIMESTAMP counter is frozen while the FIFO is enabled
+
+Not in the datasheet, which says only that the counter is "incremented by one
+for each sample (x, y, z data set) from sensor with highest ODR" (rev A, Table
+24). Polled at 20 ms intervals with the part otherwise idle:
+
+| FIFO_CTRL mode | TIMESTAMP over 8 polls |
+|---|---|
+| FIFO mode | 84, 84, 84, 84, 84, 84, 84, 84 |
+| Bypass | 630, 649, 668, 687, 706, 725, 744, 763 |
+
+In bypass it advances 19 counts per 20 ms, consistent with 906.86 Hz once the
+poll's own bus time is counted. In FIFO mode it does not move at all. The
+counter tracks writes to the **output registers**, and in FIFO mode the samples
+go to the FIFO instead.
+
+The consequence is architectural rather than cosmetic: **the FIFO path cannot
+count what it loses.** The part offers a latched overflow flag that says loss
+happened and nothing that says how much. Any future FIFO fix will have to be
+validated from outside the part, by comparing its delivered rate against the ODR
+the direct path measures.
+
+This is why `DrainResult` carries `sensorCounted` and why the binary frame now
+has a flag bit for it. Sequence numbers mean one thing on one path and a
+different thing on the other, and an instrument that let those be confused is
+how "dropped: 0" came to sit next to 20% sample loss.
+
+## Correction - the turn-on time is two numbers, not one
+
+The previous section recorded "Table 8: System Turn On Time 150 ms". That
+conflates two rows of the datasheet, and both of them matter:
+
+| Datasheet row | Value | What it governs |
+|---|---|---|
+| System Turn On Time (Tables 7 and 8) | **15 ms** | Initialisation after power-up or soft reset. Section 3.3.1: "during which, there should be no write/configuration to QMI8658C, to prevent possible interference and failure." |
+| Gyro Turn On Time (Table 8) | **150 ms + 3/ODR** | How long after enabling the gyro its output is worth reading |
+
+So the intermittent init needed 15 ms of patience, not 150, and the 150 ms is a
+*settling* delay that the noise measurement needed and that nobody had applied
+deliberately. `begin()` now does a soft reset (write 0xB0 to 0x60), waits 15 ms,
+confirms the reset the way the datasheet specifies - register 0x4D reads 0x80 -
+and waits the gyro's 150 ms after enabling the sensors.
+
+**No init failure has been seen since, across roughly twenty flash-and-boot
+cycles.** That is not proof, given the fault was intermittent to begin with, but
+the mechanism is now understood and addressed rather than guessed at.
+
+## New finding - ADDR_AI defaults to 0, and the two paths need opposite settings
+
+CTRL1 bit 6 (rev A section 16.1): "If ADDR_AI = 0, the register address will not
+increase... Note that the default value of ADDR_AI is 0, so it is recommended to
+set it to 1 from beginning, in case of burst read/write is required." Table 19
+gives CTRL1's reset value as 0b00100000, which confirms it.
+
+The driver had never written CTRL1. That was correct for the FIFO path by
+accident - every read of FIFO_DATA pops the next byte, so a burst that does
+*not* advance the address is exactly right - and it would have been silently
+wrong for the direct path: a 12-byte burst from AX_L would have returned twelve
+copies of AX_L, decoded into six identical axes and a standard deviation that
+meant nothing. The bit is now set per read path, by read-modify-write.
+
+Bit 5 (BE, byte order) is deliberately left untouched. Table 22 gives its reset
+value as 1, which would mean big-endian reads, but the measured resting
+accelerometer magnitude - 2019 counts against 2048 expected for 1 g at +/-16 g -
+proves the interface hands over the low byte first, as the driver assumes.
+Something in that table is inconsistent with the part. Read-modify-write means
+nothing here depends on which reading is right.
+
+## Instrument defect found and fixed - the capture could splice in stale frames
+
+Worth recording because it invalidates measurements taken before it was fixed,
+including some in the section above.
+
+`capture.py` opened the serial port, assumed the DTR/RTS toggle had reset the
+board, and sent `s` to start streaming. Measured across four consecutive
+attempts, **the reset happens only about half the time.** When it does not, the
+board is still streaming from the previous capture - and `s` is a toggle, so it
+*stopped* the stream. The board replied `# streaming 0`, which nothing was
+reading.
+
+The failure does not look like a failure. It produces a short capture of stale
+in-flight frames, decoded out of order, and before this session there was no
+counter that would notice: sequence numbers came from a delivered count, and
+`accumulate()` ignored backwards jumps entirely. Symptoms, in three failing
+runs: 587 samples instead of 18347, and 20979 backwards sequence steps that were
+silently discarded.
+
+Fixed on the host rather than by trusting the reset. `capture.py` now asks the
+board what it is doing (`?`), parses `streaming=N`, and settles it to stopped
+before configuring anything, while the link is still plain text. It also stops
+the stream when it finishes, so the next run starts from a known state. Three
+consecutive 20 s captures then returned 18347 samples and 906.85 to 906.86 Hz,
+identical to within one sample.
+
+Two smaller fixes alongside. The decoder's leftover buffer was keeping a
+trailing byte that could not begin a frame, so it crept upward by one byte per
+read for a whole capture. And duplicated samples are now counted (`repeats`)
+rather than passed over, because a duplicate is the one kind of bad sample that
+makes a noise floor look *better* than it is.
+
+## What is still open
+
+1. **The FIFO read path still loses 21.9% of its samples** and still delivers
+   position-dependent sample quality. It is no longer on the path to the first
+   build - parent spec 6.4 is amended to direct polling - but it is the only way
+   to sample above about 1.1 kHz, so the tap test needs it fixed or needs a
+   different plan. Untried: 1793.6 Hz with direct polling and a 12-byte read.
+2. **Section 9.1, axes and signs.** Needs a hand on the board; no code will do
+   it.
+3. **Section 9.5, the tap test.** Needs a printed base, and item 1.
+4. **The 3 to 4x gap to datasheet-typical noise density.** Unexplained.
+5. **What to do about 906.86 Hz.** Per-unit calibration, a startup measurement,
+   or accepting a 1.12% scale error. Will's call.
