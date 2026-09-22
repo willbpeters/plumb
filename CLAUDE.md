@@ -90,6 +90,12 @@ produces wrong numbers. Do not change any of them without explicit approval from
 
 - Do not invent accuracy numbers, or describe anything as validated that has not been measured.
 - Do not add features outside §1.2 (no app, no cloud, no Wi-Fi, no green reading, no full-swing
-  support).
-- Do not write firmware that assumes hardware is present — it is in transit. See `HANDOFF.md`
-  for what is unblocked.
+  support). Deferred-but-wanted items live in §1.2.1 and are distinct from non-goals.
+- Do not trust a test that only checks the code against itself. Several defects in this project
+  passed every such test. Compare against ground truth where ground truth exists.
+
+## State
+
+The board is in hand and working. **`HANDOFF.md` is current** — read it for what is built, what
+is proven, the open hardware defects, and what is blocked on Will. The spec has been amended
+three times against the datasheet and the hardware; those amendments are recorded in it.
