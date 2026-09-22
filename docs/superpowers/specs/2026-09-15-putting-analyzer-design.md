@@ -41,6 +41,11 @@ These are explicitly out of scope and will not be built:
 - Green reading, break estimation, or make/miss prediction.
 - Full-swing (non-putting) analysis. Load cases and sample rates differ substantially.
 - Absolute face angle relative to the target line. See §3.3.
+- **Numeric quality, skill or "putt score" ratings.** Report, never judge. A device
+  that grades a stroke asserts a standard, and 1.8° open is a miss for a tour player and
+  a fine putt for most people. The number is reported and the graphic carries the
+  intuition. Written into the contract here because a competitor ships a 0–100 score and
+  the idea will be re-proposed otherwise — see the 2026-09-22 competitive feature review.
 
 ### 1.2.1 Deferred — considered, postponed, not rejected
 
@@ -71,6 +76,36 @@ So it should be built as an **approximation, labelled as one**, and its accuracy
 after measurement rather than before. It would also be the first metric in this device whose
 accuracy depends on the golfer's consistency rather than on the instrument, which is worth
 being clear about before it ships.
+
+**Metrics the pipeline nearly already produces.** A 2026-09-22 review of Plus Putt Path
+(`2026-09-22-competitive-feature-review-design.md`) found several quantities this device
+computes internally and discards. They are listed here rather than in the first build because
+promoting them is a scope decision, not a technical one. None requires new sensing.
+
+- **Face-to-path differential.** Face angle minus path direction; both already in
+  `StrokeResult`. It is what determines where a putt starts, and it is a relationship between
+  two things the device measures rather than a measurement against a reference it lacks. It
+  does NOT escape §3.3 — an address-squareness error biases the face term and not the path
+  term, so nothing cancels.
+- **Face rotation rate at impact.** The gyro reading at the impact sample projected onto
+  measured gravity: one dot product, and **no integration at all.** Every other metric here is
+  an integral whose budget is dominated by drift; this one is a direct reading of the
+  best-characterised channel against a measured 0.22–0.24 dps floor. It may be the most
+  accurate number the device can produce. Reporting it is not a putter-type prior — invariant 1
+  forbids the algorithm keying off rotation, not the device reporting it.
+- **Total face rotation through the stroke.** `twist_angle` over a different interval.
+- **Absolute stroke timings.** Backstroke and forward-stroke milliseconds, time to contact, and
+  the pause at the top. The state machine has the indices; only the ratio is currently kept.
+  Timing is this device's best-validated axis.
+- **Backswing and follow-through length, and their ratio.** Same track machinery as path, but
+  far better conditioned: the integration noise that inflates a 6 mm arc is negligible against
+  a backswing of a few hundred millimetres. The RATIO is better still, because a pivot-offset
+  error scales both lengths nearly equally and largely cancels — so it may be reportable while
+  the arc is not. Measure before claiming.
+- **Left-handed mirrored mode.** Every screen is framed "left is the target"; for a left-handed
+  golfer that is backwards. Pure UI, and a genuine gap rather than a nice-to-have.
+- **Compare-to-first-stroke, and local session history.** Permitted by §1.2, which rules out
+  cloud sync, accounts and history *beyond* on-device storage — not on-device history itself.
 
 ### 1.3 Project positioning
 
@@ -275,6 +310,10 @@ proud of the butt. This is mild counterbalancing and is generally perceived favo
 Because the same puck is used on every putter, added mass is a controlled constant across the
 validation study rather than a per-putter confound.
 
+**Corroborated externally.** Plus Putt Path, a shipping grip-mounted analyser, is 33 g (24 g
+device + 9 g adapter). A commercial product landing within 10% of this estimate is evidence
+the budget is realistic rather than optimistic.
+
 ### 5.5 Primary mechanical risk: mount compliance
 
 The base anchors into rubber. The device must resolve 1° through an impact shock event, and
@@ -294,6 +333,17 @@ with a soft mallet, and take an FFT of the ringdown.
 **Escalation path:** open the grip butt hole with a step drill and anchor an expanding collet
 into the steel shaft bore (~.580" ID). This is rigid but destructive to the grip and cannot be
 used on borrowed or demo putters.
+
+**Third option, between the two: a manufacturer-designed port.** SuperStroke Tech Port grips
+ship with a port in the butt intended to accept a sensor. It is more rigid than a barb in
+rubber, non-destructive, and available to anyone who buys that grip — found via a competitor
+that lists compatibility with it (2026-09-22 competitive feature review).
+
+This does NOT replace the barbed taper, because §5.6's whole point is tolerating grips the
+project does not control. Its value is as a **rigid reference for the tap test**: run §5.5
+against both mounts and the test stops being pass/fail and becomes a comparison, with the
+barb's compliance measured against a known-good mount rather than judged against a threshold.
+If the barb fails, it is also an escalation path that destroys nothing.
 
 ### 5.6 Grip compatibility survey
 

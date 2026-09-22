@@ -133,6 +133,7 @@ Everything except the battery is unblocked.
 | 5 | Calipers | Digital, 0.01 mm | 1 | Section 2 is unusable without them. |
 | 6 | Multimeter | Any | 1 | Required twice: §4.4 hazard 2 (meter cell polarity before first connection) and section 1 (verify charge current after rework). |
 | 7 | Soft mallet | For the §5.5 tap test | 1 | Phase 1 gate. |
+| 8 | **SuperStroke Tech Port grip** | Any model with the Tech Port butt | 1 | Added 2026-09-22 from the competitive feature review. A manufacturer-designed sensor port is more rigid than a barb in rubber, so it serves as the **known-good reference mount** for the §5.5 tap test — turning a pass/fail gate into a comparison. Also a non-destructive escalation path if the barb fails, unlike §5.5's step-drill-and-collet. Needs a spare putter or a re-grip. |
 
 ### Battery requirements, once unblocked
 
@@ -179,7 +180,9 @@ cell mass mid-study if it were adopted late.
    the buy list can be ordered today.
 2. **Magnet dimensions.** Blocks the magnet order and the pocket geometry.
 3. **Board thickness and connector protrusion.** Blocks the puck, not the base.
-4. **Grip butt hole diameters.** Blocks the base's barb geometry — and this is the one only you
+4. **Whether to buy the Tech Port grip now.** It is only useful once you are running the
+   tap test, but it changes what that test can tell you — see §5.5 as amended.
+5. **Grip butt hole diameters.** Blocks the base's barb geometry — and this is the one only you
    can answer, because it depends on which putters you intend to fit.
 
-Items 3 and 4 are calipers, not research.
+Items 3 and 5 are calipers, not research.
