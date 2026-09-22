@@ -47,8 +47,8 @@ The blocking defect is gone.
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
-| **§9.4 resting gyro noise** | **0.2765 dps** worst axis, robust 0.2548, against a 0.8 dps stillness threshold. The measurement the whole instrument existed to produce. |
-| **Host tooling** | `capture.py` (verified board state, honest loss reporting), `rest_noise.py` (per-axis σ, robust σ, window σ, position-within-batch). 95 tests. |
+| **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
+| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. 110 tests. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 ### What the direct-register experiment settled
@@ -77,9 +77,15 @@ experiment confirmed it. It did.
 2. **Path arc magnitude is ~61% of truth** — a known gap, pinned by a test, documented in
    `test_path_arc_magnitude_is_known_to_fall_short_of_truth`. Direction classification, which
    is what the screen shows, is unaffected.
-3. **Resting noise is 3–4× datasheet-typical.** 0.2765 dps measured against 0.074 predicted
+3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
-   there is 2.9× margin against the threshold that matters.
+   there is 3× margin against the threshold that matters.
+4. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
+   captures an hour apart on an untouched board: the quietest half-second windows agreed to
+   within 10% (0.22 against 0.24 dps), while the worst window went from 0.41 to **1.217 dps —
+   over the 0.8 threshold**. Mostly on one axis, so it is mechanical coupling; a cable would do
+   it. This is not a reason to raise the threshold (invariant 5), it is a reason the Phase 2
+   corpus has to be recorded somewhere representative or it answers the wrong question.
 
 **Resolved this session:** the FIFO sample loss (routed around), the corrupted FIFO reads
 (quantified, and no longer in the signal path), the intermittent init (soft reset + the
@@ -92,11 +98,26 @@ silently splice stale frames into a measurement.
 
 Nothing is blocked on code any more. In order of what unblocks the most:
 
-**1. §9.1 axes and signs.** Needs a hand on the board, and nothing else. Rotate it about each
-axis and confirm the sign appears on the channel the body frame expects: Z along the shaft
-pointing head-to-butt, X the face normal. Ten minutes with `capture.py` in CSV mode, and every
-downstream sign convention depends on it. It is the cheapest remaining item and it gates the
-port of the fusion code.
+**1. §9.1 axes and signs — the tool is built and waiting for a hand.**
+
+```
+cd analysis && uv run python tools/axis_check.py --port COM4
+```
+
+It prompts, you act, it decides. Rest the board on a face; the accelerometer says which axis
+points up, absolutely, because a sensor at rest reads +1 g on whatever points up. Then turn the
+board a quarter turn anticlockwise as seen from above; by the right-hand rule the matching gyro
+channel must read positive about that up direction. Three faces covers all three axes. It
+removes the gyro bias before integrating, derives its motion threshold from the noise it just
+measured, and refuses to deliver a verdict on a turn that was really a knock.
+
+What it settles is the sensor triad: which gyro channel is which board axis, and whether the
+triad is right-handed. A left-handed triad is the kind of defect that reports a stroke that
+opened as one that closed. **The other half of §9.1 — how that triad sits relative to the
+PUTTER (Z along the shaft, X the face normal) — is a property of the mount and cannot be
+checked until a base is printed.**
+
+Everything downstream depends on this and it gates the port of the fusion code.
 
 **2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is

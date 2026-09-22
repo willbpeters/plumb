@@ -20,7 +20,7 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 | §9.1 Axes and signs | **not done** — needs the board rotated by hand |
 | §9.2 Dropped samples | **PASS on the direct read path** — 54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear throughout. Still fails on the FIFO path (21.9% lost) |
 | §9.3 Measured ODR | **stroke rate done: 906.86 Hz**, against 896.8 nominal. Maximum rate not measured |
-| §9.4 Resting gyro noise | **measured: 0.2765 dps** worst axis, against a 0.8 dps stillness threshold |
+| §9.4 Resting gyro noise | **measured.** Sensor floor **0.22-0.24 dps** (quietest windows, stable across sessions); whole-capture worst axis 0.28-0.56 dps depending on what the room is doing. Against a 0.8 dps stillness threshold |
 | §9.5 Tap test | **blocked** — needs a printed base, and neither read path can deliver uniformly sampled data above 1 kHz |
 
 Read the sections in order: the 2026-09-21 morning session found the FIFO
@@ -365,6 +365,48 @@ equivalent noise bandwidth is reckoned as first-order. Unexplained, and not
 worth chasing while there is a 2.9x margin against the threshold that matters.
 Quantisation is not the explanation: one count is 0.0078 dps, so sigma is 35
 counts.
+
+## Follow-up, same day — the noise floor is the sensor's, the total is the room's
+
+A second direct capture taken about an hour after the one above, on the same
+board, same surface, same firmware, and nothing touched in between:
+
+| | 60 s capture | 20 s capture, later |
+|---|---|---|
+| Worst-axis sigma over the whole capture | 0.2765 dps | **0.5631 dps** |
+| Quietest 0.5 s window | 0.2207 | **0.2440** |
+| Median 0.5 s window | 0.2842 | 0.5182 |
+| Worst 0.5 s window | 0.4109 | **1.2170** |
+| raw/robust | 1.05-1.09 | 1.04-1.16 |
+
+**The quietest windows agree to within 10%. Everything else moved.** That
+splits the measurement cleanly in two, and the earlier section's claim that
+"the room is not the dominant contributor" was true of that capture rather than
+of this board in general:
+
+- **The sensor's floor is about 0.22-0.24 dps**, stable across sessions and
+  captures. That is the number that transfers.
+- **The total at any moment depends on what the room is doing**, and it moved
+  by 2x between two captures an hour apart. Most of it landed on gyro X (0.56
+  against 0.23 on Z), which is a direction, so it is mechanical coupling rather
+  than electrical noise. A tugging USB cable would do it.
+
+### Why this matters more than the size of the number
+
+Against the 0.8 dps `stillness_gyro_std_rad` threshold, the sensor has a 3.5x
+margin and keeps it. But **one half-second window in the later capture reached
+1.217 dps, which is over the threshold** — on a board that nobody touched.
+
+So the thing that will defeat the stillness detector is not sensor noise. It is
+the environment, and ADDRESS is exactly a stillness test over a window of about
+this length. A golfer standing over a putt on grass is a quieter mechanical
+environment than a desk with a cable on it, so this is not a reason to raise
+the threshold — invariant 5 says thresholds come from logged data, and the data
+that settles this is a corpus recorded on a green, not on a desk.
+
+It is a reason to record, before Phase 2 begins, that **the false-negative mode
+for stroke detection is environmental vibration**, and that the corpus has to
+be captured somewhere representative or it will answer the wrong question.
 
 ## Measured ODR (section 9.3) - 906.86 Hz, and it is not nominal
 

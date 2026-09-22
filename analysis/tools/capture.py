@@ -211,6 +211,7 @@ def main() -> None:
     import serial
 
     from plumb.sensor import FullScale
+    from tools import board
 
     ap = argparse.ArgumentParser(description="Capture IMU samples from the board.")
     ap.add_argument("--port", required=True, help="e.g. COM4")
@@ -241,48 +242,10 @@ def main() -> None:
 
     with serial.Serial(args.port, args.baud, timeout=0.1) as port:
         if not args.no_start:
-            # Opening the port toggles DTR/RTS, which resets the ESP32. So the
-            # board is rebooting right now and its setup() holds for 2 s before
-            # it will accept anything. This is also why you cannot start the
-            # stream from the Arduino serial monitor and then run this script:
-            # the reset would stop it again.
-            print(f"# resetting board, waiting for boot...", file=sys.stderr)
-            time.sleep(2.5)
-            port.reset_input_buffer()
-
-            # Do not trust the reset. Measured on this board: opening the port
-            # resets it only sometimes, and when it does not, the stream from
-            # the previous capture is still running -- so the `s` below would
-            # STOP it. Ask the board what it is doing and settle it first,
-            # while the link is still idle and the reply is plain text.
-            for _ in range(6):
-                port.write(b"?")
-                time.sleep(0.2)
-                state = parse_streaming_state(
-                    port.read(8192).decode("utf-8", "replace"))
-                if state is False:
-                    break
-                if state is True:
-                    port.write(b"s")
-                    time.sleep(0.2)
-            else:
-                print("# WARNING: board never reported a stopped stream; "
-                      "capture may start mid-stream", file=sys.stderr)
-
-            port.write(b"9" if args.rate == "max" else b"1")
-            # Selecting a rate restarts the gyro, and the part specifies 150 ms
-            # + 3/ODR before its output means anything (datasheet Table 8).
-            # The firmware waits it out; this has to wait for the firmware.
-            time.sleep(0.4)
-            port.write(b"d" if args.read_path == "direct" else b"f")
-            time.sleep(0.2)
-            port.write(b"b")        # binary framing
-            time.sleep(0.2)
-            port.write(b"s")        # start streaming
-            time.sleep(0.2)
-            if args.read_path == "direct" and args.rate == "max":
-                print("# WARNING: direct reads cannot keep up at max rate; "
-                      "expect most samples to be lost", file=sys.stderr)
+            # The connect sequence, and the reason it does not trust the port
+            # reset, live in tools/board.py.
+            board.connect(port, args.rate, args.read_path, binary=True)
+            board.start(port)
             print(f"# streaming at {args.rate} rate via {args.read_path} path, "
                   f"capturing {args.seconds:.0f} s", file=sys.stderr)
 
@@ -317,10 +280,7 @@ def main() -> None:
                 tick, tick_bytes, tick_batches = now, 0, 0
 
         if not args.no_start:
-            # Leave the board quiet. A stream left running is what made the
-            # next capture's `s` stop it instead of starting it.
-            port.write(b"s")
-            time.sleep(0.2)
+            board.stop(port)
 
     np.save(args.out, np.array(rows, dtype=np.int16))
 
