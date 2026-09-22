@@ -35,7 +35,7 @@ angle and tempo need no putter geometry at all. Only path does, because path is 
 
 ## Current state
 
-**The board is in hand and working, and the instrument now measures honestly.** Three of the
+**The board is in hand and working, and the instrument now measures honestly.** Four of the
 five acceptance criteria in the instrument spec are met. The algorithm is proven in simulation.
 The blocking defect is gone.
 
@@ -45,6 +45,7 @@ The blocking defect is gone.
 |---|---|
 | **Synthetic harness** (`analysis/`) | 80 tests. Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. |
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
+| **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
@@ -124,26 +125,18 @@ silently splice stale frames into a measurement.
 
 Nothing is blocked on code any more. In order of what unblocks the most:
 
-**1. §9.1 axes and signs — the tool is built and waiting for a hand.**
+**1. Port `Pipeline` to C.** This is the step that turns a proven algorithm into a device, and
+nothing blocks it any more. §9.1 came back identity and right-handed on 2026-09-22, so the port
+needs no channel remapping at the driver boundary.
 
-```
-cd analysis && uv run python tools/axis_check.py --port COM4
-```
+Do it the way the conventions require: translate `plumb/pipeline.py`, `quat.py` and `pivot.py`,
+then run the SAME synthetic corpus through the C build on the host and compare against Python.
+That differential harness is what stops a silent divergence during translation, and it needs no
+hardware. There is no JTAG on this board (§14.3), so a divergence found later would be found
+with printf.
 
-It prompts, you act, it decides. Rest the board on a face; the accelerometer says which axis
-points up, absolutely, because a sensor at rest reads +1 g on whatever points up. Then turn the
-board a quarter turn anticlockwise as seen from above; by the right-hand rule the matching gyro
-channel must read positive about that up direction. Three faces covers all three axes. It
-removes the gyro bias before integrating, derives its motion threshold from the noise it just
-measured, and refuses to deliver a verdict on a turn that was really a knock.
-
-What it settles is the sensor triad: which gyro channel is which board axis, and whether the
-triad is right-handed. A left-handed triad is the kind of defect that reports a stroke that
-opened as one that closed. **The other half of §9.1 — how that triad sits relative to the
-PUTTER (Z along the shaft, X the face normal) — is a property of the mount and cannot be
-checked until a base is printed.**
-
-Everything downstream depends on this and it gates the port of the fusion code.
+`axis_check.py` is still worth re-running after a base is printed, to settle the other half of
+§9.1.
 
 **2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
@@ -230,12 +223,6 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
 
 ## Blocked on Will
 
-- **▸ Run the axis check.** `cd analysis && uv run python tools/axis_check.py --port COM4`.
-  Built, tested and waiting since 2026-09-21; it needs a hand on the board and ten minutes, and
-  nothing else. It prompts for each step and decides for itself. **Everything in the fusion port
-  is gated on it** — the sign conventions cannot be ported until it is known which gyro channel
-  is which board axis and whether the triad is right-handed. Paste the summary table into
-  `docs/bringup-results.md` under a new "Axes and signs (§9.1)" heading when it is done.
 - **Print a base.** The tap test (§5.5) is still the highest-risk unknown in the project and it
   has not started. If the mount resonates below ~200 Hz, §5.5's escalation runs *before* any
   further firmware work.

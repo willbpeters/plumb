@@ -10,6 +10,7 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 | Date | Firmware | Board |
 |---|---|---|
 | 2026-09-21 | `imu_stream` | Waveshare ESP32-S3-Touch-LCD-1.28 |
+| 2026-09-22 | `imu_stream` | same board — §9.1 axes and signs |
 
 ---
 
@@ -17,7 +18,7 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 
 | Criterion | Status |
 |---|---|
-| §9.1 Axes and signs | **not done** — needs the board rotated by hand |
+| §9.1 Axes and signs | **PASS for the sensor triad** — gyro channels map 1:1 to board axes, right-handed, measured 2026-09-22. How the triad sits relative to the PUTTER still needs a printed base |
 | §9.2 Dropped samples | **PASS on the direct read path** — 54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear throughout. Still fails on the FIFO path (21.9% lost) |
 | §9.3 Measured ODR | **stroke rate done: 906.86 Hz**, against 896.8 nominal. Maximum rate not measured |
 | §9.4 Resting gyro noise | **measured.** Sensor floor **0.22-0.24 dps** (quietest windows, stable across sessions); whole-capture worst axis 0.28-0.56 dps depending on what the room is doing. Against a 0.8 dps stillness threshold |
@@ -86,7 +87,8 @@ uniformly sampled data for its FFT.
 
 ## Axes and signs (§9.1)
 
-Not yet done.
+Was "not yet done" through the 2026-09-21 sessions. Measured 2026-09-22 — see
+"Axes and signs (section 9.1)" at the end of this document.
 
 ---
 
@@ -569,3 +571,70 @@ makes a noise floor look *better* than it is.
 4. **The 3 to 4x gap to datasheet-typical noise density.** Unexplained.
 5. **What to do about 906.86 Hz.** Per-unit calibration, a startup measurement,
    or accepting a 1.12% scale error. Will's call.
+
+---
+
+# Axes and signs (section 9.1) — 2026-09-22
+
+Measured with `tools/axis_check.py`, board rested on three faces and turned a
+quarter turn anticlockwise about each vertical in turn. Gravity supplies the
+reference: a sensor at rest reads +1 g on whatever axis points up, so the
+"which axis is vertical" half needs no external instrument, and by the
+right-hand rule an anticlockwise turn about that direction must read positive
+on the matching gyro channel.
+
+| Board axis up | Gyro that responded | Integrated angle | Verdict |
+|---|---|---|---|
+| +X | +X | +73.8 deg | **PASS** |
+| +Y | +Y | +99.8 deg | **PASS** |
+| -Z | -Z | -94.9 deg | **PASS** |
+
+**The channel mapping is the identity, and the triad is right-handed relative
+to the accelerometer.** Gyro X is board X, Y is Y, Z is Z, with no swap and no
+sign flip anywhere. The port needs no remapping at the driver boundary, which
+is the cheapest possible outcome and the one worth confirming rather than
+assuming.
+
+What this rules out is the defect class that matters: a left-handed triad would
+have reported a stroke that opened as one that closed, and no amount of
+downstream accuracy would have caught it.
+
+## The angles are a sanity check, not a calibration
+
+73.8, 99.8 and -94.9 degrees against a nominal 90. These were free-hand turns
+of a book, so the spread is the hand, not the sensor. What they do establish is
+that the whole chain -- counts to dps to integrated degrees, through the
+full-scale constant, the ODR and the bias removal -- has no gross error in it.
+A factor of two, a radians/degrees slip or a wrong full-scale constant would
+have shown up here as 45, 180 or 5157 degrees rather than as "roughly a quarter
+turn". Tier 0 of parent spec section 10.1, the printed protractor plate, is the
+measurement that turns this into a calibration.
+
+## Two things in the record worth keeping
+
+**Cross-axis response was 28% and 40%**, against the ~16% the resting tilt alone
+predicts (the board sat 6.0 and 9.1 degrees off square, and tan of those is
+0.11 and 0.16). The excess is the turn not being purely about the vertical --
+a board propped on edge and turned by hand wobbles. It does not threaten the
+verdict, because the dominant channel led by more than a factor of two in every
+round, but it is the reason this procedure cannot do better than identify
+channels and signs.
+
+**Gyro noise during the stillness windows read 1.12 and 2.31 dps**, against the
+0.22-0.24 dps floor measured on a board lying flat and undisturbed. A board
+propped on edge against a mug, with a cable attached, is a much worse
+mechanical environment than a board lying flat -- which is the same lesson as
+the half-second window that hit 1.217 dps, and more evidence that the threat to
+stillness detection is the mounting and the environment rather than the sensor.
+The tool derives its motion threshold from the noise it measures in that same
+window, so the test worked anyway: it armed at 22.3 and 46.1 dps instead of the
+~5 dps it would have used on a quiet board.
+
+## What is still open in 9.1
+
+**How the sensor triad sits relative to the PUTTER.** The body frame the
+algorithm assumes is Z along the shaft pointing head to butt, X the face
+normal. That is a property of the mount, not of the board, and it cannot be
+measured until a base is printed and the puck seats in a grip at a known
+clocking. This section establishes only that the three channels are what they
+say they are, in the order and handedness the algorithm expects.
