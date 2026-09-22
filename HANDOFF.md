@@ -51,6 +51,7 @@ The blocking defect is gone.
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
 | **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
 | **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. 122 tests. |
+| **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 ### What the direct-register experiment settled
@@ -125,18 +126,28 @@ silently splice stale frames into a measurement.
 
 Nothing is blocked on code any more. In order of what unblocks the most:
 
-**1. Port `Pipeline` to C.** This is the step that turns a proven algorithm into a device, and
-nothing blocks it any more. §9.1 came back identity and right-handed on 2026-09-22, so the port
-needs no channel remapping at the driver boundary.
+**1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
+the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
 
-Do it the way the conventions require: translate `plumb/pipeline.py`, `quat.py` and `pivot.py`,
-then run the SAME synthetic corpus through the C build on the host and compare against Python.
-That differential harness is what stops a silent divergence during translation, and it needs no
-hardware. There is no JTAG on this board (§14.3), so a divergence found later would be found
-with printf.
+```
+cd analysis; uv run pytest tests/test_c_port.py -q -s
+```
 
-`axis_check.py` is still worth re-running after a base is printed, to settle the other half of
-§9.1.
+builds the harness and prints the worst difference per operation. It came back **0.000e+00 on
+every quaternion operation in double precision** — the C reproduces NumPy bit for bit, because
+the translation keeps the arithmetic in the Python's order. Floating-point addition is not
+associative, so tidying an expression while translating changes the last bits and turns a clean
+diff into an investigation. Keep doing it that way.
+
+Two things to know before continuing:
+
+- **The precision decision is open and now has numbers.** See `real.h`. Single precision costs
+  about one ulp per operation (1.0–1.6e-07), which matters because the ESP32-S3's FPU is
+  single-precision and doubles are emulated in software at 896.8 Hz. What is **not** measured is
+  what that does across a whole stroke, where the integrator accumulates ~1300 steps. Measure
+  that before switching; one ulp per step is not one ulp per stroke.
+- **MSVC is driven directly, not through `vcvars64.bat`**, which hangs in Git Bash here.
+  `firmware/test/build.sh` discovers the toolchain paths itself and falls back to cc/gcc.
 
 **2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
