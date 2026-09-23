@@ -9,13 +9,15 @@ rewrite.
 Only `Pipeline` and its state are ported to C.
 """
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
 
 import numpy as np
 
 from plumb import quat
-from plumb.pivot import PivotCalibration, PivotEstimator, skew
+from plumb.pivot import (RATE_FILTER_HZ, PivotCalibration, PivotEstimator,
+                         skew)
 from plumb.sensor import FullScale
 from plumb.trajectory import SAMPLE_RATE_HZ
 
@@ -54,12 +56,25 @@ class Thresholds:
     path_straight_arc_m: float = 0.003
     # Low-pass corner for the rate that feeds the pivot fit, in Hz. See
     # plumb/pivot.py for the measured trade-off this sits on, and note that it
-    # is a filter design rather than a detection threshold.
-    pivot_filter_hz: float = 2.0
+    # is a filter design rather than a detection threshold. Defined once, next
+    # to the table that justifies it, so the two cannot drift apart.
+    pivot_filter_hz: float = RATE_FILTER_HZ
     # Above this unexplained share of the measured acceleration the pivot fit
     # is not describing a rigid rotation about a fixed point, and the path
     # falls back to the sensor's own lever arm.
     pivot_max_residual: float = 0.5
+    # How long ADDRESS stays valid after its last stillness window. The address
+    # reference is taken from the stillness immediately before takeaway, so a
+    # motion that starts longer than this after the golfer last held still has
+    # no reference and is not measured. Also bounds the ADDRESS sample buffer
+    # to stillness_window_s + address_max_gap_s. PLACEHOLDER like the rest:
+    # it must exceed the ~50 ms onset-to-confirmation latency, and beyond that
+    # it is for the Phase 2 corpus to say.
+    address_max_gap_s: float = 1.0
+    # A stroke not finished this long after its onset is abandoned -- a
+    # practice stroke with no ball never produces an impact spike. PLACEHOLDER,
+    # for the corpus to set from the longest real stroke.
+    stroke_timeout_s: float = 4.0
 
 
 @dataclass
@@ -78,11 +93,29 @@ class Pipeline:
         self.fs = full_scale
         self.lever_arm = lever_arm_m
         self.dt = 1.0 / SAMPLE_RATE_HZ
+        self._window = int(self.th.stillness_window_s / self.dt)
+        self._address_gap = int(self.th.address_max_gap_s / self.dt)
 
         self.state = State.IDLE
         self.visited: list[State] = [State.IDLE]
         self.n = 0
+        # Stroke attempts abandoned: no impact inside the timeout, or no valid
+        # address before the motion. Counted so a caller can tell "nothing
+        # happened" from "started and gave up".
+        self.aborts = 0
 
+        # Shared across strokes when the caller supplies one. A single stroke
+        # recovers the pivot to only about 17% at this board's noise floor;
+        # five converge to 2.4% (see PivotCalibration). Without one, the path
+        # is computed from this stroke alone and is correspondingly noisy.
+        self._pivot_calibration = pivot_calibration
+        self._reset_stroke()
+
+    def _reset_stroke(self) -> None:
+        """Everything that belongs to one stroke attempt and nothing that
+        outlives it. An abandoned attempt must leave no trace in the next --
+        in particular it must not fold into the pivot calibration, which only
+        a completed stroke does, in _compute."""
         self._still: list[np.ndarray] = []
         self._still_accel: list[np.ndarray] = []
         self.address_captured = False
@@ -96,7 +129,16 @@ class Pipeline:
         self.i_transition = None
         self.i_impact = None
         self._hold = 0
-        self._omega_history: list[np.ndarray] = []
+        # Only the most recent samples are ever read.
+        self._omega_history: deque[np.ndarray] = deque(maxlen=25)
+        # Raw samples held in ADDRESS, as (n, omega, accel). Nothing is
+        # integrated in ADDRESS: the reference is chosen once the stroke onset
+        # is known, and the samples since then are replayed (see _rebase).
+        # Bounded, so a golfer can stand over the ball indefinitely at
+        # constant memory.
+        self._address_buffer: deque = deque(maxlen=self._window
+                                            + self._address_gap)
+        self._last_still_n = 0
 
         # Back-tracking state. Detecting a stroke boundary always lags the
         # boundary itself; these record where it actually was. Past data only.
@@ -120,12 +162,7 @@ class Pipeline:
         # rather than the algorithm -- see test_pipeline.true_face_path.
         self._track_first_n: int | None = None
         self._track_last_n: int | None = None
-        self._pivot = PivotEstimator(self.dt, thresholds.pivot_filter_hz)
-        # Shared across strokes when the caller supplies one. A single stroke
-        # recovers the pivot to only about 17% at this board's noise floor;
-        # five converge to 2.4% (see PivotCalibration). Without one, the path
-        # is computed from this stroke alone and is correspondingly noisy.
-        self._pivot_calibration = pivot_calibration
+        self._pivot = PivotEstimator(self.dt, self.th.pivot_filter_hz)
         self._pivot_solution = None
         self._impact_track_index = 0
 
@@ -141,6 +178,23 @@ class Pipeline:
         self.visited.append(state)
         self._hold = 0
 
+    def _abort(self) -> None:
+        self.aborts += 1
+        self._reset_stroke()
+        self._enter(State.IDLE)
+
+    def _window_stats(self, omegas, accels):
+        """The stillness test, and the two references it licenses.
+
+        Parent spec 7.1: g0 and the gyro bias are both means over the SAME
+        stillness window. Averaging gravity over a longer span than the
+        stillness test covers would mean averaging over motion the test never
+        vetted.
+        """
+        omegas = np.asarray(omegas)
+        still = bool(np.all(omegas.std(axis=0) < self.th.stillness_gyro_std_rad))
+        return still, omegas.mean(axis=0), np.asarray(accels).mean(axis=0)
+
     # -- main entry point ------------------------------------------------
     def step(self, gyro_counts: np.ndarray, accel_counts: np.ndarray):
         omega = self._to_rad_s(gyro_counts)
@@ -154,11 +208,23 @@ class Pipeline:
         if self.state is State.DONE:
             return None
 
+        if self.state is State.ADDRESS:
+            self._step_address(omega, accel)
+            return None
+
         self._integrate(omega, accel)
 
-        if self.state is State.ADDRESS:
-            self._step_address(omega)
-        elif self.state is State.BACKSWING:
+        if (self.n - self.i_backswing_start) * self.dt > self.th.stroke_timeout_s:
+            if self.state is State.FOLLOWTHROUGH:
+                # Impact is already captured, and nothing reported depends on
+                # the putter settling afterwards -- the hold only ends the
+                # track. A golfer who walks after the ball still gets a result.
+                self._enter(State.DONE)
+                return self._compute()
+            self._abort()
+            return None
+
+        if self.state is State.BACKSWING:
             self._step_backswing(omega, accel)
         elif self.state is State.DOWNSWING:
             self._step_downswing(omega, accel)
@@ -169,14 +235,8 @@ class Pipeline:
         return None
 
     def _step_idle(self, omega, accel) -> None:
-        """Wait for stillness, then capture both references at once.
-
-        Parent spec 7.1: entering ADDRESS captures the gravity vector g0 and the
-        gyro bias, both as means over the SAME stillness window. Averaging
-        gravity over a longer span than the stillness test covers would mean
-        averaging over motion the stillness test never vetted.
-        """
-        window = int(self.th.stillness_window_s / self.dt)
+        """Wait for stillness, then capture both references at once."""
+        window = self._window
         self._still.append(omega)
         self._still_accel.append(accel)
         if len(self._still) < window:
@@ -184,16 +244,33 @@ class Pipeline:
         self._still = self._still[-window:]
         self._still_accel = self._still_accel[-window:]
 
-        recent = np.array(self._still)
-        if np.all(recent.std(axis=0) < self.th.stillness_gyro_std_rad):
-            self.bias = recent.mean(axis=0)
-            self.g0 = np.array(self._still_accel).mean(axis=0)
+        still, bias, g0 = self._window_stats(self._still, self._still_accel)
+        if still:
+            self.bias, self.g0 = bias, g0
             self.address_captured = True
             self.q = quat.identity()
+            first = self.n - window + 1
+            for k, (w, a) in enumerate(zip(self._still, self._still_accel)):
+                self._address_buffer.append((first + k, w, a))
+            self._last_still_n = self.n
             self._enter(State.ADDRESS)
 
-    def _step_address(self, omega) -> None:
-        """Detect the backswing, and record where it actually started.
+    def _step_address(self, omega, accel) -> None:
+        """Keep the address reference current, detect the backswing, and
+        record where it actually started.
+
+        The reference is NOT the first stillness the device saw. Golfers
+        settle, re-aim the face, then take the putter back. A reference frozen
+        at first stillness counts the re-aim as face angle -- measured: a 2 deg
+        re-aim reported as 1.88 deg on a square stroke -- and a long address
+        integrates bias error for its whole length rather than the ~1.5 s
+        invariant 4 relies on. Spec 8.5 says the references are re-captured
+        during every ADDRESS stillness window; this is that.
+
+        While the golfer holds still the bias is kept current, so the onset
+        test measures against the latest estimate. The reference the stroke is
+        actually measured from is chosen on confirmation, in _rebase, once the
+        onset is known.
 
         Confirming a backswing needs a threshold crossing plus a hold, and both
         are late -- the rate has to climb from zero to 8 deg/s and then persist
@@ -210,7 +287,27 @@ class Pipeline:
         `_last_quiet_n` reads only past samples, so this is a ring buffer rather
         than lookahead and remains implementable on-device.
         """
+        self._address_buffer.append((self.n, omega, accel))
         corrected = omega - self.bias
+
+        # Refresh only on a quiet sample, so the sub-threshold start of a
+        # stroke's rise cannot drag the running bias toward the stroke.
+        if (len(self._address_buffer) >= self._window
+                and np.linalg.norm(corrected) < self.th.onset_gyro_rad):
+            window = list(self._address_buffer)[-self._window:]
+            still, bias, g0 = self._window_stats([w for _, w, _ in window],
+                                                 [a for _, _, a in window])
+            if still:
+                self.bias, self.g0 = bias, g0
+                self._last_still_n = self.n
+                corrected = omega - self.bias
+
+        if self.n - self._last_still_n > self._address_gap:
+            # No stillness for longer than any stroke onset can lag it: the
+            # golfer has fidgeted or walked off, and the reference no longer
+            # describes anything.
+            self._abort()
+            return
 
         # Measure the swing using only the component PERPENDICULAR to the shaft.
         #
@@ -238,21 +335,88 @@ class Pipeline:
         # and barely depends on where the threshold sits.
         #
         # Uses the previous sample only: past data, one stored float.
-        if magnitude < self.th.onset_gyro_rad:
-            self._last_quiet_n = self.n
-        elif self._prev_magnitude is not None and self._prev_magnitude < self.th.onset_gyro_rad:
-            rise = magnitude - self._prev_magnitude
-            if rise > 0.0:
-                self._last_quiet_n = self.n - 1 - self._prev_magnitude / rise
-        self._prev_magnitude = magnitude
+        self._track_onset(self.n, magnitude)
 
         if magnitude > self.th.backswing_gyro_rad:
             self._hold += 1
             if self._hold * self.dt >= self.th.backswing_hold_s:
                 self.i_backswing_start = self._last_quiet_n
+                if not self._rebase():
+                    self._abort()
+                    return
                 self._enter(State.BACKSWING)
         else:
             self._hold = 0
+
+    def _track_onset(self, n, magnitude) -> None:
+        """One step of the onset back-extrapolation described above."""
+        if magnitude < self.th.onset_gyro_rad:
+            self._last_quiet_n = n
+        elif self._prev_magnitude is not None and self._prev_magnitude < self.th.onset_gyro_rad:
+            rise = magnitude - self._prev_magnitude
+            if rise > 0.0:
+                self._last_quiet_n = n - 1 - self._prev_magnitude / rise
+        self._prev_magnitude = magnitude
+
+    def _rebase(self) -> bool:
+        """Take the address reference from the stillness just before onset,
+        and integrate forward from there.
+
+        The window used is the latest still one ending at or before the
+        back-extrapolated onset, so it holds no stroke motion -- not even the
+        sub-threshold start of the rise. Attitude is the identity at the end
+        of that window, and the samples since -- the rise, and the hold that
+        confirmed it -- are replayed through the same integrator that runs
+        live, so deciding late loses nothing.
+
+        Past data only: on the device this is the ADDRESS ring buffer and one
+        catch-up pass of a few dozen samples at confirmation. Returns False
+        when no still window precedes the onset inside the buffer; the motion
+        then has no valid address and is not measured.
+        """
+        items = list(self._address_buffer)
+        onset = int(np.floor(self.i_backswing_start))
+        end = None
+        for idx in range(len(items) - 1, self._window - 2, -1):
+            if items[idx][0] > onset:
+                continue
+            window = items[idx - self._window + 1: idx + 1]
+            still, bias, g0 = self._window_stats([w for _, w, _ in window],
+                                                 [a for _, _, a in window])
+            if still:
+                end = idx
+                break
+        if end is None:
+            return False
+
+        self.bias, self.g0 = bias, g0
+
+        # Re-derive the onset against this clean bias. The live estimate was
+        # made against the running bias, which a window ending inside the
+        # stroke's sub-threshold rise can have nudged toward the stroke --
+        # measured as a 0.0003 shift in tempo ratio. Same arithmetic as live,
+        # over the same buffered samples.
+        self._prev_magnitude = None
+        for n, w, _ in items[end:]:
+            self._track_onset(n, np.linalg.norm((w - self.bias)[:2]))
+        self.i_backswing_start = self._last_quiet_n
+
+        self.q = quat.identity()
+        self._face_track.clear()
+        self._track_matrix.clear()
+        self._track_first_n = None
+        self._track_last_n = None
+        # The first replayed interval is [end, end + 1], and the trapezoid
+        # needs the rate at its near edge: the window's last sample.
+        self._prev_omega = items[end][1] - self.bias
+
+        live_n = self.n
+        for n, w, a in items[end + 1:]:
+            self.n = n
+            self._integrate(w, a)
+        self.n = live_n
+        self._address_buffer.clear()
+        return True
 
     def _integrate(self, omega, accel) -> None:
         """Attitude integration with the accelerometer correction gain driven
@@ -358,7 +522,7 @@ class Pipeline:
             self._pivot.update(corrected, accel - gravity_body)
 
     def _dominant_axis(self) -> int:
-        recent = np.array(self._omega_history[-25:])
+        recent = np.array(self._omega_history)
         return int(np.argmax(np.abs(recent).mean(axis=0)))
 
     def _step_backswing(self, omega, accel) -> None:
@@ -487,7 +651,9 @@ class Pipeline:
         # the arc shortfall this replaces.
         #
         # PORT NOTE: the 3x3 per sample costs 48 KB over a 1.5 s stroke at
-        # 896.8 Hz, against 16 KB for the track alone. That is affordable on
+        # 896.8 Hz, against 16 KB for the track alone. The track starts at the
+        # stroke onset rather than ADDRESS entry, and stroke_timeout_s caps how
+        # long it can grow. That is affordable on
         # this part but it is not free, and invariant 7 already has claims on
         # internal SRAM. If it becomes tight, the reduction is to assume the
         # pivot lies on the shaft axis, which collapses the matrix back to a

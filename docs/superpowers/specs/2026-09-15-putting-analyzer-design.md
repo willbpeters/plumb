@@ -237,7 +237,7 @@ an alignment stick if they want one.
 ### 4.3 Power budget
 
 Active draw is approximately 70–100 mA (CPU at 240 MHz, backlight on, LVGL rendering, IMU at
-500 Hz). A 400 mAh cell yields roughly 4–5 hours of continuous operation.
+896.8 Hz — the §6.4 rate; this estimate was made at 500 Hz and has not been re-measured). A 400 mAh cell yields roughly 4–5 hours of continuous operation.
 
 Because the device sleeps between strokes (§9), realistic practice use is measured in weeks
 rather than hours. The ≥500 strokes-per-charge target in §3 is set against the sleep-enabled
@@ -496,7 +496,40 @@ SLEEP → IDLE → ADDRESS → BACKSWING → DOWNSWING → IMPACT → FOLLOWTHRO
 | FOLLOWTHROUGH | \|ω\| below threshold for 300 ms |
 
 Entering ADDRESS captures two things: the gravity vector `g₀`, and the gyro bias `b` as the
-mean angular rate over the stillness window. Sampling steps to 500 Hz on ADDRESS entry.
+mean angular rate over the stillness window. Sampling steps to 896.8 Hz on ADDRESS entry.
+
+*Amended 2026-09-23.* Three changes, all found by running the pipeline on strokes the
+synthetic harness had never generated.
+
+- **The reference is the stillness immediately before takeaway, not the first stillness
+  seen.** `g₀` and `b` were captured once, on ADDRESS entry, and everything after was
+  integrated. A golfer who settles and then re-aims the face had the re-aim reported as face
+  angle — measured, a 2° re-aim read as 1.88° on a square stroke — and a long address
+  integrated bias error for its whole length, so the ~1.5 s window §7.2 relies on became
+  address time plus stroke time (0.34° after a 10 s address, against under 0.04° after 1 s).
+  Now, on backswing confirmation, `g₀` and `b` come from the latest still window ending at
+  or before the back-extrapolated onset, attitude is identity at the end of that window, and
+  the few dozen buffered samples since are replayed through the live integrator. Nothing is
+  integrated in ADDRESS, so its memory is a bounded ring buffer however long the golfer
+  stands there. This is what §8.5's "re-captured during every ADDRESS stillness window"
+  means in practice.
+- **ADDRESS → IDLE** when no still window has been seen for `address_max_gap_s`: the golfer
+  has fidgeted or walked off, and a stroke begun after that has no valid reference.
+- **Any stroke state → IDLE** when the stroke is not finished `stroke_timeout_s` after its
+  onset — a practice stroke with no ball never produces an impact spike, and the machine
+  previously sat in DOWNSWING forever. The one exception is FOLLOWTHROUGH, where impact is
+  already captured: the timeout computes the result rather than discarding it.
+
+Both new values are placeholders in the same sense as every other threshold here, to be set
+from the Phase 2 corpus.
+
+**Open, and measurable on the board in hand:** §6.4 monitors at 112.1 Hz and steps to 896.8
+on ADDRESS entry. Under the design above, the reference window is the one just before
+takeaway, so it is sampled at stroke rate provided ADDRESS lasts at least the stillness
+window plus the gyro's turn-on settle after the rate change (the driver waits 150 ms). What
+is not known is whether the QMI8658's gyro bias depends on its ODR and filter setting; if it
+does, a bias taken during monitoring must never be used during a stroke. The harness runs
+at stroke rate throughout and cannot see this.
 
 All detection thresholds referenced above are deliberately left unnumbered here. They are
 derived empirically from the logged stroke corpus during Phase 2 and fixed in the Python
@@ -701,8 +734,9 @@ Two constraints that invalidate a session if unplanned:
 
 A LittleFS partition occupies the ~13 MB of flash not used by the application.
 
-One stroke at 500 Hz × 1.5 s × 6 axes × 2 bytes ≈ **9 KB**, giving capacity for roughly
-**1,400 raw strokes** on-device.
+One stroke at 896.8 Hz × 1.5 s × 6 axes × 2 bytes ≈ **16 KB**, giving capacity for roughly
+**800 raw strokes** on-device. (Recomputed 2026-09-23 for the §6.4 rate amendment; it
+previously read 500 Hz, 9 KB and 1,400.)
 
 Each record carries a header — timestamp, putter profile ID, firmware version, active
 calibration values — followed by raw int16 samples. Raw samples are stored rather than derived

@@ -19,7 +19,7 @@ def test_impact_occurs_exactly_where_swing_angle_crosses_zero(tempo):
 
 @pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
 def test_achieved_tempo_ratio_is_recorded_and_close_to_requested(tempo):
-    """A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
+    """A fixed sample grid cannot land an arbitrary tempo ratio on a whole sample, so
     the generator snaps to samples and reports what it actually produced."""
     t = generate(StrokeParams(tempo_ratio=tempo))
     backswing = t.time[t.transition_index] - t.time[t.address_end_index]

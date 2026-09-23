@@ -98,4 +98,5 @@ produces wrong numbers. Do not change any of them without explicit approval from
 
 The board is in hand and working. **`HANDOFF.md` is current** — read it for what is built, what
 is proven, the open hardware defects, and what is blocked on Will. The spec has been amended
-three times against the datasheet and the hardware; those amendments are recorded in it.
+repeatedly against the datasheet, the hardware and the harness; each amendment is recorded in
+it, and `HANDOFF.md` lists them.

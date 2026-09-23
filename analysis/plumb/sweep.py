@@ -80,16 +80,20 @@ def worst_face_error(rows) -> float:
 
 
 def noise_breakdown_dps(rows) -> float:
-    """Highest swept noise level at which every stroke was detected AND met the
-    face-angle target. Reported rather than asserted: the definition of done
-    asks us to STATE this number, not to hit a particular value."""
-    levels = sorted({r.gyro_noise_dps for r in rows})
-    passing = [
-        n for n in levels
-        if all(r.detected and abs(r.face_error_deg) <= FACE_TARGET_DEG
-               for r in rows if r.gyro_noise_dps == n)
-    ]
-    return max(passing) if passing else 0.0
+    """Highest swept noise level up to which every stroke was detected AND met
+    the face-angle target. Reported rather than asserted: the definition of
+    done asks us to STATE this number, not to hit a particular value.
+
+    The last level before the FIRST failure, not the highest passing level: a
+    level that passes by luck above one that failed does not extend the
+    tolerance, and reporting it would claim one the pipeline does not have."""
+    breakdown = 0.0
+    for n in sorted({r.gyro_noise_dps for r in rows}):
+        if not all(r.detected and abs(r.face_error_deg) <= FACE_TARGET_DEG
+                   for r in rows if r.gyro_noise_dps == n):
+            break
+        breakdown = n
+    return breakdown
 
 
 def main() -> None:

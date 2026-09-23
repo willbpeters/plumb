@@ -88,6 +88,30 @@ assumption. A real shoulder-driven stroke pivots near the base of the neck,
 which is off-axis. This one needs the Phase 2 corpus to decide, not a test
 that already agrees with it.
 
+ONE CAUSE OF THE WRONG ERROR BAR IS IDENTIFIED, AND FIXING IT ALONE MAKES
+THINGS WORSE. Measured 2026-09-23, same five-stroke setup, after the address
+reference moved to the stillness just before takeaway (which moved the 0.42 m
+row to 0.65 m -- this component is that sensitive).
+
+`dof = 3 * samples - 3` treats every sample as independent. They are not: both
+sides are low-passed at RATE_FILTER_HZ, so the residual is correlated over
+about 2 tau = 0.16 s, some 143 samples at 896.8 Hz, and sigma_b / sqrt(lambda)
+understates each error bar by roughly sqrt(143) = 12x. Dividing the sample
+count by 143 in the significance test:
+
+    noise   putter      d (current)                 d (N / 143)
+     0.00   straight    (-0.009,  0.000, -0.568) r2   ( 0.000,  0.000, -0.568) r1
+     0.05   straight    (-0.009,  0.652, -0.569) r3   (-0.009,  0.000, -0.569) r2
+     0.28   arced       (-0.013,  0.115, -0.530) r3   (-0.016,  0.180, -0.507) r2
+     0.00   arced       (-0.010,  0.031, -0.557) r3   (-0.005,  0.179, -0.504) r1
+
+It removes the 0.65 m, and it damages the arced rows -- noiselessly -- because
+the directions it drops are eigenvectors, which mix the body axes. Truncating
+one throws away part of d_z along with the spurious d_y. So the correlation
+is real and should be in any eventual fix, but the per-eigendirection
+truncation is the deeper problem, and the shaft-axis question above is still
+the one to settle first. Not applied.
+
 Why the angular rate is filtered first. The noise here is in the DESIGN matrix,
 not only in the measurement: omega and omega_dot both build K. Least squares
 with a noisy design matrix is biased toward zero -- feed it the raw signal at
@@ -204,7 +228,8 @@ def solve_normal_equations(ata, atb, btb: float, samples: int
     residual = max(0.0, btb - 2.0 * offset @ atb + offset @ ata @ offset)
 
     # Standard error per direction: sigma_b / sqrt(lambda). Three equations per
-    # sample, three parameters. A direction the stroke barely excited has a
+    # sample, three parameters -- and samples counted as independent, which the
+    # low-pass makes untrue; see the module docstring before changing it. A direction the stroke barely excited has a
     # small lambda and therefore a large error bar, which is exactly the
     # statement that it was not measured.
     dof = max(1, 3 * samples - 3)

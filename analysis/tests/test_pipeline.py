@@ -53,7 +53,7 @@ def test_state_machine_visits_every_state_in_order():
 @pytest.mark.parametrize("tempo", [1.5, 2.0, 2.5, 3.0])
 def test_tempo_ratio_recovered(tempo):
     """Compared against the ratio the generator actually produced, not the one
-    requested -- the 500 Hz grid cannot hit an arbitrary ratio exactly, and
+    requested -- the sample grid cannot hit an arbitrary ratio exactly, and
     holding the pipeline to a target the stroke never contained would be
     measuring the generator's rounding, not the pipeline."""
     traj, _, result = run_stroke(StrokeParams(tempo_ratio=tempo))
@@ -408,3 +408,171 @@ def test_arc_magnitude_meets_the_spec_target_under_noise(lie):
     print(f"\n  lie {lie:>4.1f} deg  mean {mean:.3f}  worst {worst:.3f}  "
           f"n={len(ratios)}")
     assert 0.90 < mean < 1.10, f"arc averages {100 * mean:.1f}% of truth"
+
+
+# -- Address reference and abandoned strokes -------------------------------
+#
+# Every stroke the generator produced before these tests began with exactly
+# one second of perfect stillness and ended in an impact. The three defects
+# below lived entirely outside that envelope: the address reference was taken
+# the moment stillness was first seen and never again, so anything that
+# happened afterwards was counted as part of the stroke; and a motion that
+# never struck a ball had no way out of the state machine at all.
+
+from dataclasses import replace
+
+from plumb.sensor import GRAVITY, FullScale
+from plumb.trajectory import SAMPLE_RATE_HZ
+
+
+def _feed(pipe, gyro, accel):
+    result = None
+    for g, a in zip(gyro, accel):
+        r = pipe.step(g, a)
+        if r is not None:
+            result = r
+    return result
+
+
+def _address_rotated_about_shaft(traj, phi_of_i, phi_dot_of_i, upto):
+    """The generated stroke, with the ADDRESS samples before `upto` turned
+    about the shaft by phi. Physically consistent: attitude, body rate and the
+    accelerometer's view of gravity all move together, because simulate()
+    derives the accelerometer from the attitude it is given."""
+    q_true = traj.q_true.copy()
+    omega_true = traj.omega_true.copy()
+    for i in range(upto):
+        q_true[i] = quat.multiply(traj.q_true[i], quat.rot_z(phi_of_i(i)))
+        omega_true[i] = np.array([0.0, 0.0, phi_dot_of_i(i)])
+    return replace(traj, q_true=q_true, omega_true=omega_true)
+
+
+def test_face_reaimed_during_address_is_not_counted_as_face_angle():
+    """Invariant 3: face angle is relative to ADDRESS, and address is the pose
+    the golfer takes the putter back from -- not the first half-second of
+    stillness the device happened to see.
+
+    The golfer settles with the face 2 deg shut, the device captures that,
+    then the golfer squares the face, holds, and strokes. Truth is the
+    generator's face angle, 0, because the stroke itself is unchanged. The
+    reference-at-first-stillness pipeline reported 1.88 deg here: the re-aim,
+    seen through the lie angle.
+    """
+    dt = 1.0 / SAMPLE_RATE_HZ
+    delta = np.radians(-2.0)
+    i0, i1 = int(1.0 / dt), int(1.5 / dt)
+
+    def phi(i):
+        u = np.clip((i - i0) / (i1 - i0), 0.0, 1.0)
+        return delta * (1.0 - 0.5 * (1.0 - np.cos(np.pi * u)))
+
+    def phi_dot(i):
+        if not i0 <= i <= i1:
+            return 0.0
+        u = (i - i0) / (i1 - i0)
+        return -delta * 0.5 * np.pi * np.sin(np.pi * u) / ((i1 - i0) * dt)
+
+    traj = generate(StrokeParams(address_duration_s=3.0))
+    traj = _address_rotated_about_shaft(traj, phi, phi_dot, upto=i1 + 1)
+    out = simulate(traj, SensorParams(), seed=1)
+    pipe = Pipeline(Thresholds(), out.full_scale)
+    result = _feed(pipe, out.gyro_counts, out.accel_counts)
+
+    assert result is not None
+    print(f"\n  re-aimed address: face {result.face_angle_deg:+.4f} deg, truth 0")
+    assert result.face_angle_deg == pytest.approx(0.0, abs=0.1)
+
+
+def test_a_long_address_does_not_lengthen_the_integration_window():
+    """Invariant 4 rests on drift having ~1.5 s to accumulate. That holds only
+    if integration starts at takeaway. Started at the first sight of
+    stillness, a golfer who stands over the ball for ten seconds integrates
+    bias error for eleven and a half.
+
+    Measured before the fix, these five seeds at 0.28 dps and a slow bias walk
+    gave 0.340 deg after a 10 s address, against under 0.04 deg after a 1 s
+    one. After it, the address length should not matter, because the
+    reference is re-taken from the stillness immediately before the stroke.
+    """
+    sensor = SensorParams(gyro_noise_dps=0.28, gyro_bias_dps=1.0,
+                          gyro_bias_walk_dps_per_s=0.01)
+    traj = generate(StrokeParams(address_duration_s=10.0))
+    errors = []
+    for seed in range(5):
+        out = simulate(traj, sensor, seed=seed)
+        pipe = Pipeline(Thresholds(), out.full_scale)
+        result = _feed(pipe, out.gyro_counts, out.accel_counts)
+        errors.append(abs(result.face_angle_deg))
+    print(f"\n  10 s address: worst face error {max(errors):.4f} deg")
+    assert max(errors) < 0.1
+
+
+def test_track_storage_is_set_by_the_stroke_not_the_address():
+    """The path track stores a vector and a 3x3 per sample. Stored from the
+    start of ADDRESS it grows for as long as the golfer stands still, which on
+    the device is unbounded memory in a state that can last indefinitely."""
+    lengths = {}
+    for seconds in (1.0, 10.0):
+        traj = generate(StrokeParams(address_duration_s=seconds))
+        out = simulate(traj, SensorParams(), seed=1)
+        pipe = Pipeline(Thresholds(), out.full_scale)
+        _feed(pipe, out.gyro_counts, out.accel_counts)
+        lengths[seconds] = len(pipe._track_matrix)
+    assert lengths[10.0] == pytest.approx(lengths[1.0], abs=2), lengths
+
+
+def _rest(counts_accel_last, seconds):
+    n = int(seconds * SAMPLE_RATE_HZ)
+    return (np.zeros((n, 3), dtype=np.int16),
+            np.tile(counts_accel_last, (n, 1)).astype(np.int16))
+
+
+def test_a_stroke_that_never_strikes_a_ball_is_abandoned():
+    """A practice stroke has no impact spike. Before this, the machine sat in
+    DOWNSWING forever, growing its buffers by a sample every 1.1 ms, and never
+    measured another stroke. It must give up, go back to IDLE, and then
+    measure the next real stroke as if nothing had happened."""
+    practice = simulate(generate(StrokeParams()),
+                        SensorParams(impact_peak_g=0.0), seed=1)
+    rest_g, rest_a = _rest(practice.accel_counts[-1], 8.0)
+    real_traj = generate(StrokeParams(face_angle_at_impact_deg=2.0))
+    real = simulate(real_traj, SensorParams(), seed=2)
+
+    pipe = Pipeline(Thresholds(), practice.full_scale)
+    assert _feed(pipe, np.vstack([practice.gyro_counts, rest_g]),
+                 np.vstack([practice.accel_counts, rest_a])) is None
+    assert pipe.aborts == 1
+    assert pipe.state in (State.IDLE, State.ADDRESS)
+    assert len(pipe._track_matrix) == 0
+
+    result = _feed(pipe, real.gyro_counts, real.accel_counts)
+    assert result is not None
+    assert result.face_angle_deg == pytest.approx(2.0, abs=0.1)
+    assert result.tempo_ratio == pytest.approx(real_traj.true_tempo_ratio,
+                                               abs=0.05)
+
+
+def test_leaving_address_without_a_stroke_returns_to_idle():
+    """A golfer who settles and then fidgets, or walks off, has no valid
+    address any more. Rotation about the shaft never trips backswing
+    detection -- deliberately, see invariant 1 -- so without this the machine
+    stays in ADDRESS holding a reference that no longer describes anything."""
+    dt = 1.0 / SAMPLE_RATE_HZ
+    traj = generate(StrokeParams(address_duration_s=8.0))
+    start = int(1.0 / dt)
+    amp, hz = np.radians(2.0), 1.0
+
+    def phi(i):
+        return 0.0 if i < start else amp * np.sin(2 * np.pi * hz * (i - start) * dt)
+
+    def phi_dot(i):
+        return 0.0 if i < start else amp * 2 * np.pi * hz * np.cos(
+            2 * np.pi * hz * (i - start) * dt)
+
+    end = int(7.0 / dt)
+    traj = _address_rotated_about_shaft(traj, phi, phi_dot, upto=end)
+    out = simulate(traj, SensorParams(), seed=1)
+    pipe = Pipeline(Thresholds(), out.full_scale)
+    _feed(pipe, out.gyro_counts[:end], out.accel_counts[:end])
+    assert State.ADDRESS in pipe.visited
+    assert pipe.state is State.IDLE

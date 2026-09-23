@@ -1,9 +1,10 @@
 # Handoff — Plumb
 
-**Date:** 2026-09-22
+**Date:** 2026-09-23
 **For:** Claude Code, picking this project up cold
-**Supersedes:** the 2026-09-21 handoff. Defect 4 was re-measured this session and
-its diagnosis CHANGED; defect 6 is new. Read both before touching path.
+**Supersedes:** the 2026-09-22 handoff. The address reference moved (spec §7.1 amended) and
+defect 6 gained a measurement. Before that, defect 4 was re-measured and its diagnosis CHANGED,
+and defect 6 was new. Read both before touching path.
 
 ---
 
@@ -11,7 +12,7 @@ its diagnosis CHANGED; defect 6 is new. Read both before touching path.
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It has been amended four times; see "Spec amendments" below.**
+   of truth. **It has been amended repeatedly; see "Spec amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
 
@@ -161,6 +162,42 @@ experiment confirmed it. It did.
    the base of the neck, which is off-axis. **This one needs the Phase 2 corpus.**
    Full measurements and the reasoning are in `analysis/plumb/pivot.py`.
 
+   **Update 2026-09-23 — one cause of the wrong error bar found; fixing it alone is
+   worse.** The significance test counts every sample as independent, but the 2 Hz
+   low-pass correlates them over ~143 samples, so the error bars are ~12x too small.
+   Correcting the count removes the spurious cross-shaft component on a straight putter
+   and damages the arced one, noiselessly (d_z -0.557 -> -0.504), because the directions
+   it drops are eigenvectors that mix the body axes. Not applied. Table in `pivot.py`.
+   Also: after the address change below, the 0.42 m row reads 0.65 m — same defect,
+   sensitive to small changes upstream.
+
+**Resolved 2026-09-23:** three state-machine defects outside anything the harness had ever
+generated — every synthetic stroke had exactly 1 s of perfect stillness and ended in impact.
+Spec §7.1 amended; tests in `test_pipeline.py` under "Address reference and abandoned strokes".
+
+- *Re-aiming the face after settling was reported as face angle.* The address reference was
+  captured once, at first stillness; a 2° re-aim read as 1.88° on a square stroke. The
+  reference now comes from the still window just before the back-extrapolated onset, and the
+  samples since are replayed. Nothing is integrated in ADDRESS any more.
+- *A long address widened the integration window* that invariant 4 relies on: 0.34° worst
+  after a 10 s address against under 0.04° after 1 s. Now independent of address length.
+  Side effect worth knowing: at a 1 s address, 0.28 dps, 60 seeds, face-angle RMS went
+  from 0.023° to 0.016°, because the address period's noise is no longer integrated.
+  Noiseless face (0.00116°), tempo (0.00900) and arc ratios are unchanged to the digits
+  printed; defect 4's ratios moved 1.244 -> 1.235 (5°) and 1.086 -> 1.091 (20°).
+- *No exit from a stroke that never struck a ball*, or from an ADDRESS the golfer walked away
+  from — the machine sat there forever with unbounded buffers. New `stroke_timeout_s` and
+  `address_max_gap_s` in `Thresholds`, **placeholders like every other value there**, for
+  Phase 2 to set.
+
+Also fixed: `noise_breakdown_dps` could report a level above an earlier failure; stale
+500 Hz / noise-floor / "bit-identical" comments; the pivot filter corner was defined twice.
+Suite: **139 passed, 1 xfailed**, C differential tests running (not skipped).
+
+**Open design question, measurable now:** §6.4 monitors at 112.1 Hz and steps to 896.8 on
+ADDRESS entry. Does the QMI8658's gyro bias depend on ODR/filter setting? If so, a bias taken
+while monitoring must never reach a stroke. Recorded in the §7.1 amendment.
+
 **Resolved 2026-09-22:** the differential test was silently skipping for want of a compiler
 (see "The compiler"), and the diagnosis of defect 4 was wrong. Suite: **133 passed, 1 xfailed**.
 
@@ -237,7 +274,7 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-All four came from reading the datasheet or measuring the hardware. Each is recorded in the
+All came from reading the datasheet, measuring the hardware, or running the harness. Each is recorded in the
 spec with its reasoning.
 
 | § | Was | Now | Why |
@@ -245,6 +282,7 @@ spec with its reasoning.
 | 6.4 | gyro ±250 dps | **±256 dps** | ±250 does not exist on this part. Its table is powers of two. Converting at 250 while configured at 256 puts a 2.4% scale error into every integrated angle. |
 | 6.4 | 500 Hz stroke, 100 Hz monitor | **896.8 Hz, 112.1 Hz** | Neither exists. ODR steps derive from the gyro's natural frequency. 896.8 chosen over 448.4 because tempo is the binding constraint and its error halved. |
 | 6.4 | "FIFO batching is mandatory" | **direct register polling** | Measured: the FIFO loses 21.9% of samples and cannot count what it loses; direct polling loses none. The original bus-cost argument confused transaction overhead with data volume. |
+| 7.1 | reference captured on ADDRESS entry; no exits | **reference from stillness just before onset; ADDRESS and stroke timeouts** | A face re-aim during address was counted as face angle, a long address widened the drift window, and a stroke with no impact never ended. Measured; see Open defects, "Resolved 2026-09-23". |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.

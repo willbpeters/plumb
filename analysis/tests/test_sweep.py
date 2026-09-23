@@ -60,3 +60,16 @@ def test_sweep_is_reproducible():
     small = run_sweep(noises=(0.2,), **SMALL)
     again = run_sweep(noises=(0.2,), **SMALL)
     assert small == again
+
+
+def test_breakdown_point_is_the_last_level_before_the_first_failure():
+    """A level that happens to pass ABOVE one that failed is not a breakdown
+    point -- reporting it would state a noise tolerance the pipeline does not
+    have. Constructed rows, so the answer is known: pass, fail, pass."""
+    from plumb.sweep import SweepRow
+
+    def row(noise, error):
+        return SweepRow(0.0, "ARCED", 2.0, noise, 0.0, 1, True, error, error, 0.0)
+
+    rows = [row(0.0, 0.1), row(0.5, 2.0), row(1.0, 0.5)]
+    assert noise_breakdown_dps(rows) == 0.0

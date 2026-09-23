@@ -8,7 +8,7 @@
 #include <Arduino.h>
 
 enum class Rate {
-  Stroke,   // nearest supported ODR to 500 Hz -- stroke capture, noise floor
+  Stroke,   // 896.8 Hz, the step above the spec's original 500 Hz -- stroke capture, noise floor
   Max,      // highest supported ODR -- tap test (spec 5.5 needs > 1 kHz)
 };
 

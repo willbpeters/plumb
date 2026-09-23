@@ -25,8 +25,9 @@ static Sample batch[BATCH_MAX];
 static Format format = Format::Csv;
 static Rate rate = Rate::Stroke;
 // Direct is the default because it is the path that has been measured: zero
-// sample loss and a 0.37 dps resting noise floor, against ~20% loss and a
-// position-dependent 1.07 dps through the FIFO (docs/bringup-results.md). The
+// sample loss and a 0.2765 dps worst-axis resting sigma, against 21.9% loss and
+// a position-dependent 0.3405 dps through the FIFO (docs/bringup-results.md,
+// last section -- it supersedes the earlier figures). The
 // FIFO path stays for the tap test, which runs at a rate direct polling cannot
 // service.
 static ReadPath path = ReadPath::Direct;

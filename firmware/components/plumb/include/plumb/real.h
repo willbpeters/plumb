@@ -28,9 +28,13 @@
  *     from_axis_angle  0.000e+00
  *     to_matrix        0.000e+00
  *
- * The double column is EXACTLY zero on every operation -- the C reproduces
- * NumPy bit for bit, which is what keeping the arithmetic in the Python's
- * order buys. The float column is about one ulp of single precision (1.19e-07)
+ * The double column is EXACTLY zero on every operation UNDER MSVC -- the C
+ * reproduces NumPy bit for bit, which is what keeping the arithmetic in the
+ * Python's order buys. That is the compiler's answer, not a property of the
+ * port: built with `zig cc` (clang), the same cases come back at about
+ * 2.2e-16, one ulp, consistent with clang contracting a*b + c*d into an FMA.
+ * So a non-zero double column is not by itself a translation error. See
+ * HANDOFF.md, "The compiler". The float column is about one ulp of single precision (1.19e-07)
  * on everything except twist_angle, where the larger number is the relative
  * metric losing meaning as the angle passes through zero rather than the
  * answer being worse.
