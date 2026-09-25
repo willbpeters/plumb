@@ -15,6 +15,7 @@ from enum import Enum, auto
 import numpy as np
 
 from plumb import quat
+from plumb.calibration import AccelCalibration
 from plumb.pivot import PivotCalibration, PivotEstimator, skew
 from plumb.sensor import FullScale
 from plumb.trajectory import SAMPLE_RATE_HZ
@@ -69,9 +70,14 @@ class StrokeResult:
 class Pipeline:
     def __init__(self, thresholds: Thresholds, full_scale: FullScale,
                  lever_arm_m: float = 0.85,
-                 pivot_calibration: PivotCalibration | None = None):
+                 pivot_calibration: PivotCalibration | None = None,
+                 accel_calibration: AccelCalibration | None = None):
         self.th = thresholds
         self.fs = full_scale
+        # The device calibration, parent spec 8.1. Optional so the harness can
+        # run without one, but path is not accurate without it on real
+        # hardware: see plumb/calibration.py for what an uncorrected bias does.
+        self.accel_cal = accel_calibration or AccelCalibration.identity()
         self.lever_arm = lever_arm_m
         self.dt = 1.0 / SAMPLE_RATE_HZ
 
@@ -130,7 +136,7 @@ class Pipeline:
         return counts.astype(float) * self.fs.gyro_rad_per_count
 
     def _to_mps2(self, counts: np.ndarray) -> np.ndarray:
-        return counts.astype(float) * self.fs.accel_mps2_per_count
+        return self.accel_cal.apply(counts.astype(float) * self.fs.accel_mps2_per_count)
 
     def _enter(self, state: State) -> None:
         self.state = state

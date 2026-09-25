@@ -443,3 +443,56 @@ def test_arc_under_noise_does_not_depend_on_putter_type():
     print(f"\n  session-mean arc / truth at lie 5, 0.28 dps: {means}")
     assert abs(means["ARCED"] - 1.0) < 0.05, means
     assert abs(means["ARCED"] - means["STRAIGHT"]) < 0.03, means
+
+
+def test_accelerometer_bias_needs_the_device_calibration():
+    """Open defect 6, and parent spec 8.1 shown to be load-bearing for path.
+
+    An accelerometer bias reaches the arc two ways, found by oracles: it tilts
+    the ground plane that `g0` defines, which leaks the head's vertical motion
+    into lateral (a bias on body Y, the swing axis, does this and the stroke
+    cannot observe it); and it leaks (I - R^T) b into the pivot fit (body X).
+    Neither is fixable per stroke. The device calibration removes both.
+
+    Ground truth throughout: the true face path. The biased board's
+    calibration is solved from a simulated tumble of the same sensor, by the
+    same solver the host tool uses, not handed in.
+    """
+    from plumb.calibration import solve_accel_calibration
+    from plumb.pivot import PivotCalibration
+    from plumb.sensor import GRAVITY
+
+    bias = np.array([0.05, 0.2, -0.1])
+    scale = 0.01
+    base = dict(gyro_noise_dps=0.28, accel_noise_mps2=0.02, gyro_bias_dps=1.5)
+
+    # The tumble: this sensor's own resting readings on six faces, through the
+    # same bias-and-scale model the simulator applies to the stroke.
+    ups = np.vstack([np.eye(3), -np.eye(3)]) * GRAVITY
+    tumble = ups * (1.0 + scale) + bias
+    accel_cal = solve_accel_calibration(tumble, gravity=GRAVITY)
+
+    def session(sensor, calibration=None):
+        pivot = PivotCalibration()
+        ratios = []
+        for seed in range(1, 13):
+            traj = generate(StrokeParams(lie_angle_deg=5.0))
+            out = simulate(traj, sensor, seed=seed)
+            pipe = Pipeline(Thresholds(), out.full_scale,
+                            pivot_calibration=pivot, accel_calibration=calibration)
+            result = None
+            for i in range(len(traj.time)):
+                result = pipe.step(out.gyro_counts[i], out.accel_counts[i]) or result
+            if seed >= 5:
+                ratios.append(result.path_arc_m / true_face_path(traj, pipe)[0])
+        return float(np.mean(ratios))
+
+    clean = session(SensorParams(**base))
+    biased = SensorParams(**base, accel_bias_mps2=bias, accel_scale_error=scale)
+    raw = session(biased)
+    calibrated = session(biased, accel_cal)
+
+    print(f"\n  arc / truth at lie 5: unbiased {clean:.3f}, biased {raw:.3f}, "
+          f"biased and calibrated {calibrated:.3f}")
+    assert abs(raw - clean) > 0.1, "the bias should visibly move the arc"
+    assert calibrated == pytest.approx(clean, abs=0.005)
