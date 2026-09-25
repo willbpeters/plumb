@@ -3,7 +3,7 @@ import pytest
 
 from plumb import quat
 from plumb.pipeline import Pipeline, State, Thresholds
-from plumb.sensor import SensorParams, simulate
+from plumb.sensor import GRAVITY, FullScale, SensorParams, simulate
 from plumb.trajectory import ArcType, StrokeParams, generate
 
 
@@ -32,6 +32,43 @@ def test_gyro_bias_is_nulled_at_address():
     """Invariant 4. A 1.5 dps standing bias must be estimated and removed."""
     _, pipe, _ = run_stroke(StrokeParams(), SensorParams(gyro_bias_dps=1.5))
     np.testing.assert_allclose(np.degrees(pipe.bias), [1.5, 1.5, 1.5], atol=0.1)
+
+
+def test_accel_correction_pulls_a_tilted_attitude_back_to_gravity():
+    """The gravity correction must converge, not diverge.
+
+    Ground truth is known exactly: the device is held still, so its true
+    attitude relative to address is identity, and the estimate is seeded 2 deg
+    off in pure tilt -- the component gravity can observe. A correct
+    complementary filter shrinks that error at rate `gain`; a sign error in the
+    cross product runs the same loop as positive feedback and grows it.
+
+    Normal runs cannot see this. q resets to identity on ADDRESS entry and the
+    stock gain is a ~50 s time constant, so the wrong sign moved a 2 deg tilt
+    only to 2.082 deg over 2 s. A strong gain exposes it: 86.95 deg."""
+    fs = FullScale()
+    g_counts = np.round(np.array([0.0, 0.0, GRAVITY]) / fs.accel_mps2_per_count).astype(np.int16)
+    zero = np.zeros(3, dtype=np.int16)
+
+    pipe = Pipeline(Thresholds(accel_gain_static=2.0), fs)
+    pipe.state = State.ADDRESS
+    pipe.g0 = g_counts * fs.accel_mps2_per_count
+    pipe.bias = np.zeros(3)
+    pipe.q = quat.rot_x(np.radians(2.0))
+
+    def tilt_deg():
+        g_hat = pipe.g0 / np.linalg.norm(pipe.g0)
+        predicted = quat.rotate(quat.conjugate(pipe.q), g_hat)
+        return np.degrees(np.arccos(np.clip(predicted @ g_hat, -1.0, 1.0)))
+
+    start = tilt_deg()
+    for _ in range(int(2.0 / pipe.dt)):
+        pipe.step(zero, g_counts)
+    end = tilt_deg()
+
+    assert pipe.state is State.ADDRESS, "zero input must not trigger a backswing"
+    # 2 s at 2 rad/s is four time constants: e^-4 of 2 deg is 0.037 deg.
+    assert end < 0.1, f"tilt went {start:.3f} -> {end:.3f} deg; the correction diverges"
 
 
 def test_backswing_is_detected():

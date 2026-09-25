@@ -312,7 +312,15 @@ class Pipeline:
             measured = accel / np.linalg.norm(accel)
             reference = self.g0 / np.linalg.norm(self.g0)
             predicted = quat.rotate(quat.conjugate(self.q), reference)
-            error = np.cross(predicted, measured)
+            # measured x predicted, not the other way round. q maps body to
+            # reference and integrate() applies a BODY-frame rate, under which a
+            # fixed reference vector seen from the body moves as dp/dt = p x w.
+            # With w = m x p that gives p x (m x p) = m - p (p . m): p turns
+            # toward m. The reversed product turns it away -- positive feedback,
+            # measured taking a 2 deg tilt to 87 deg in 2 s at a gain of 2.0.
+            # The stock gain hid it (2.000 -> 2.082 deg); see
+            # test_accel_correction_pulls_a_tilted_attitude_back_to_gravity.
+            error = np.cross(measured, predicted)
             # The gain is a RATE, in rad/s per unit of error -- not a per-sample
             # step. Writing `gain * error / self.dt` and then integrating over
             # dt cancels the dt and makes each sample apply a fixed rotation of
