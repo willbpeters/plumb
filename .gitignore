@@ -8,7 +8,7 @@ __pycache__/
 # capture artefacts
 *.npy
 
-# built by firmware/test/build.sh
+# built by analysis/tools/cbuild.py (the differential test in test_c_port.py)
 firmware/test/*.exe
 firmware/test/obj/
 firmware/test/*.obj

@@ -57,10 +57,25 @@ hardware LPF -- so this costs no signal. The filter is one pole and causal, and
 it is used ONLY for the pivot fit: filtering the rate that feeds attitude
 integration would delay the attitude and bias the face angle.
 
-BOTH sides are filtered, and that is not symmetry for its own sake. `d` is a
-constant, so `LPF[K d] = LPF[K] d` exactly -- filtering both sides leaves the
-equation untouched. Filtering only K leaves K lagging b by the filter's phase,
-which showed up as a 1.5% bias on otherwise perfect data.
+BOTH sides are filtered, and that is not symmetry for its own sake: filtering
+only K leaves K lagging b by the filter's phase, which showed up as a 1.5% bias
+on otherwise perfect data. It is not exact, though. `d` is a constant, so
+`LPF[K d] = LPF[K] d` -- but what is built here is K from the filtered rate,
+and the centripetal term is quadratic in it, so K(LPF[omega]) is not LPF[K].
+That, together with the filters starting mid-stroke (the fit is fed from
+BACKSWING entry, not from rest), is the ~1% left on noiseless data.
+
+Filtering the built matrix instead was tried (2026-09-25), and measured on the
+test_pivot harness, mean of five seeds, error in the recovered offset:
+
+    fc 2.0 Hz                          noiseless   0.28 dps   2.8 dps
+    rate filtered (this code)            0.98%       3.15%     22.7%
+    matrix filtered, started mid-stroke  3.70%       2.43%     22.8%
+    matrix filtered, started from rest   0.04%       6.59%     24.2%
+
+Exact on noiseless data only when every filter starts from rest, which the
+pipeline cannot do, and no better at this board's noise floor either way. The
+rate filter stays.
 
 Nothing here keys off face rotation, so nothing here carries a putter-type
 prior (invariant 1). The pivot is swing geometry: where the golfer's hands are.
