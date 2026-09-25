@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries four marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries five marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -44,14 +44,14 @@ The blocking defect is gone.
 
 | | |
 |---|---|
-| **Synthetic harness** (`analysis/`) | 137 tests collected on 2026-09-25, all passing (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
+| **Synthetic harness** (`analysis/`) | 140 tests collected on 2026-09-25, all passing (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
 | **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
 | **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
-| **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. |
+| **Pivot offset estimation** | `plumb/pivot.py` — velocity form, noise-corrected. Closes the 61% path shortfall; arc now 0.996–1.002 of truth noiselessly for every putter type, and the session mean under 0.28 dps no longer depends on putter type (straight 1.006, arced 1.010 at lie 5). |
 | **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, and across a whole replayed stroke, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source, FMA contraction off on both. |
 | **Single precision, whole stroke** | **4.0×10⁻⁵° of face angle at worst** over ~1,850 accumulated steps, against a 1.0° target. A 30 s address hold does not grow it. Safe for the attitude integrator; see `real.h`. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
@@ -106,44 +106,65 @@ experiment confirmed it. It did.
 3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
    there is 3× margin against the threshold that matters.
-4. **Arc under noise: the peak-to-peak half is fixed; the pivot half is open.** The earlier
-   diagnosis (peak-to-peak collecting the random walk) was half right. Taken apart on
-   2026-09-25 over sixteen strokes per case rather than six:
+4. **Arc under noise — fixed on the harness, both halves.** Two causes, found by oracles
+   (replace one input of the fit with ground truth at a time and see what moves):
 
-   - **Track wander while the face is still** — mainly after it stops, because the chord that
-     defines "forward" ran to the end of the 0.3 s follow-through hold. 0.3 dps injected into
-     the hold alone moved a 24 mm arc by ±12.9%. **Fixed**: the arc is now measured from the
-     back-extrapolated onset to the first quiet sample. With the *true* pivot the pure
-     peak-to-peak bias is +0.6% on the mean; what remains at lie 5 is spread, a 6 mm arc
-     against a ~0.5 mm random walk.
-   - **The pivot fit's weakly observed direction — still open.** On the arced putter the face
-     turns with the swing, so the rotation axis tilts ~19° off body Y and the fit's weakest
-     eigen-direction (λ ≈ 1/300 of the others) carries a real share of `d`. It is mis-estimated
-     even noiselessly (+5% arc), and it is very sensitive to attitude tilt: a 0.148° tilt left
-     at the onset leaks gravity into the fit and moved `d` from (−0.010, 0.035, −0.556) to
-     (−0.020, 0.179, −0.504), +7.6% arc. Dropping the weak direction makes it *worse* (the true
-     `d` has 0.18 m along it), so it is not a significance-test fix.
+   - **Track wander while the face is still**, mainly through the chord's end point. Fixed by
+     measuring the arc over the motion only.
+   - **The pivot fit's weakest direction.** Not the tilt leak the previous version of this
+     handoff guessed — feeding the fit the *true* acceleration changed nothing (1.137), so the
+     six-unknown fit suggested here would not have helped. It was **errors-in-variables**:
+     the true angular rate alone took the arced putter from 1.142 to 1.049. On the arced putter
+     the rotation axis tilts ~19° off body Y, the weakest direction carries a real 0.18 m of
+     `d`, and noise in the design matrix shrank it by half; the remainder sat off the shaft
+     axis, where face rotation turned it into sideways path. Fixed by fitting in velocity
+     (no derivative, no filter), treating the start velocity as unknown, and subtracting the
+     gyro noise's measured contribution. The reasoning and every intermediate number are in
+     the `pivot.py` docstring.
 
    Whole pipeline, calibrated pivot, 0.28 dps + 1.5 dps bias, strokes 5–20, arc / truth:
 
-   | putter, lie | before | after |
-   |---|---|---|
-   | straight, 5 | 1.041 [0.788, 1.353] | 1.018 [0.856, 1.203] |
-   | straight, 20 | 1.017 [0.954, 1.088] | 1.010 [0.974, 1.051] |
-   | arced, 5 | 1.175 [0.927, 1.495] | 1.155 [1.009, 1.348] |
-   | arced, 20 | 1.070 [1.010, 1.144] | 1.064 [1.028, 1.110] |
+   | putter, lie | start of 2026-09-25 | motion only | + velocity fit |
+   |---|---|---|---|
+   | straight, 5 | 1.041 [0.788, 1.353] | 1.018 [0.856, 1.203] | 1.006 [0.845, 1.190] |
+   | straight, 20 | 1.017 [0.954, 1.088] | 1.010 [0.974, 1.051] | 0.999 [0.962, 1.040] |
+   | arced, 5 | 1.175 [0.927, 1.495] | 1.155 [1.009, 1.348] | 1.010 [0.850, 1.188] |
+   | arced, 20 | 1.070 [1.010, 1.144] | 1.064 [1.028, 1.110] | 0.999 [0.963, 1.040] |
 
-   Arc accuracy therefore still depends on putter type under noise — not a putter-type prior
-   (nothing keys off rotation), but a real dependence. **The untried idea**: fit a constant
-   reference-frame acceleration alongside `d` (`b = K d + Rᵀ e`, six unknowns, still linear),
-   which absorbs a tilt error's gravity leak by construction. Direction classification is
-   unaffected either way; the screen does not show arc magnitude.
+   What is left at lie 5 is **spread, not bias**: a 6 mm arc against a ~0.5 mm random walk in
+   the integrated track, per stroke. That is gyro noise through the attitude, and no pivot fit
+   removes it. Session means meet the 10% target; single small-arc strokes do not always.
+
+   **Two assumptions to check on the Phase 2 corpus.** The noise correction's *uncertainty*
+   (which decides whether a direction was observed) is computed for white noise; the board's
+   LPF makes real noise coloured, so the significance test will be optimistic there. And the
+   correction uses the stillness window's noise as the stroke's noise; hand tremor at address
+   or vibration during the stroke would break that.
+
 5. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
    captures an hour apart on an untouched board: the quietest half-second windows agreed to
    within 10% (0.22 against 0.24 dps), while the worst window went from 0.41 to **1.217 dps —
    over the 0.8 threshold**. Mostly on one axis, so it is mechanical coupling; a cable would do
    it. This is not a reason to raise the threshold (invariant 5), it is a reason the Phase 2
    corpus has to be recorded somewhere representative or it answers the wrong question.
+
+6. **Accelerometer bias inflates the arc, and it is not the pivot.** Found while checking the
+   velocity fit's robustness (the default simulator sets accel bias to zero, so nothing showed
+   it before). Arc / truth at lie 5, strokes 5–12, new fit (old fit):
+
+   | accel bias | straight | arced |
+   |---|---|---|
+   | 0 | 1.051 (1.063) | 1.055 (1.196) |
+   | 0.05 m/s² | 1.106 (1.118) | 1.123 (1.252) |
+   | 0.2 m/s² | 1.269 (1.280) | 1.328 (1.418) |
+
+   The pivot barely moves (−0.551 → −0.555 m at 0.05), so the bias reaches the arc another way.
+   **Not** through the ground plane defined by `g0`: removing the known bias from `g0` alone
+   made it worse (2.06), because `g0` also subtracts gravity and its bias was cancelling the
+   accelerometer's. A QMI8658 zero-g offset can be tens of mg, so this may matter more than
+   anything above. Next step: oracle the remaining accel paths one at a time, and measure the
+   real offset (a six-position tumble on the calibration jig would do it). Gyro scale +1% and
+   accel scale +1% cost 2% and 0.4% of arc respectively.
 
 **Resolved on 2026-09-21:** the FIFO sample loss (routed around), the corrupted FIFO reads
 (quantified, and no longer in the signal path), the intermittent init (soft reset + the
@@ -152,7 +173,7 @@ silently splice stale frames into a measurement.
 
 ### This session (2026-09-25)
 
-Eight commits from `cbe265b`, this handoff the last. Every code change came with a test that
+Commits from `cbe265b` on. Every code change came with a test that
 compares against ground truth.
 
 - **The accelerometer correction had the wrong sign** — positive feedback. `predicted × measured`
@@ -166,6 +187,9 @@ compares against ground truth.
 - **FMA contraction is off** on host and device, without which the bit-for-bit claim says
   nothing about the ESP32-S3.
 - **Arc is measured over the motion only** (open defect 4, first half).
+- **The pivot is fitted in velocity, corrected for gyro noise** (open defect 4, second half).
+  The arced putter's arc went from 1.142 to 1.010 of truth at lie 5, level with the straight
+  putter. Spec §7.4 amended; it still described `v = ω × r`.
 - **Single precision measured across a whole stroke** (next task 1, its open question).
 - **Corrected, not changed:** the pivot docstring claimed its filtering left the equation
   exact; it does not, and filtering the matrix instead was measured and is not better at the
@@ -212,8 +236,12 @@ unit's calibration into a shared constant trades a known error for a hidden one.
 options: per-unit calibration, or firmware that measures its own rate at startup — which it can
 now do in about ten lines, since the counter exists and works.
 
-**Also open, offline:** the arced putter's arc overshoot (open defect 4, second half). No
-hardware needed; the untried idea is written there.
+**Also open, offline:** accelerometer bias inflating the arc (open defect 6). No hardware
+needed to find the mechanism; hardware needed to know how big the real offset is.
+
+**Port note for `pivot.c`:** the centring is done from running sums, which cancels. Fine in
+double; in single precision the weakest eigenvalue (~0.07 against sums of ~300) keeps about four
+significant digits. Use running means (Welford), and measure it with the harness.
 
 **3. Phase 2, the logged corpus.** The instrument is trustworthy enough to log strokes with.
 Capture motion windows, not strokes — see §2.1 of the instrument spec for why that ordering
@@ -228,9 +256,10 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Four amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+Five amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
 one new section. The three to §6.4 came from reading the datasheet or measuring the hardware;
-the §11 one is a consequence of the §6.4 rate change that was missed at the time.
+the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
+records what the path code has actually done since the pivot estimate went in.
 
 | § | Was | Now | Why |
 |---|---|---|---|
@@ -238,6 +267,7 @@ the §11 one is a consequence of the §6.4 rate change that was missed at the ti
 | 6.4 | 500 Hz stroke, 100 Hz monitor | **896.8 Hz, 112.1 Hz** | Neither exists. ODR steps derive from the gyro's natural frequency. 896.8 chosen over 448.4 because tempo is the binding constraint and its error halved. |
 | 6.4 | "FIFO batching is mandatory" | **direct register polling** | Measured: the FIFO loses 21.9% of samples and cannot count what it loses; direct polling loses none. The original bus-cost argument confused transaction overhead with data volume. |
 | 11 | ≈9 KB per stroke, ~1,400 strokes | **≈16 KB, ~800 strokes** | Storage estimate was still computed at 500 Hz. Recomputed at 896.8 Hz: 1,345 samples × 12 B against the ~13 MB partition, before headers. Amended 2026-09-22. |
+| 7.4 | `v_face = ω × r` | **`r + d`, `d` fitted per stroke and per golfer** | The sensor translates; the stroke rotates about the hands. The code has estimated `d` since `9516b6f` without a spec amendment; recorded 2026-09-25 with the velocity-form fit that replaced the acceleration form. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.
