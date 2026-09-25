@@ -97,6 +97,14 @@ def build(name: str, *defines: str) -> BuildResult:
     unix = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
     if unix:
         command = [unix, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                   # No fused multiply-add. Contracting a*b+c into one
+                   # rounding changes the last bits, and the bit-for-bit
+                   # comparison against NumPy (include/plumb/real.h) means
+                   # nothing if the compiler is free to do it. x86-64
+                   # baseline happens not to contract; the ESP32-S3 has
+                   # MADD.S and GCC contracts by default, so the host build
+                   # states the same rule the component's CMakeLists does.
+                   "-ffp-contract=off",
                    f"-I{COMPONENT / 'include'}",
                    *(f"-D{d}" for d in defines),
                    *(str(s) for s in SOURCES), "-lm", "-o", str(output)]
@@ -112,6 +120,11 @@ def build(name: str, *defines: str) -> BuildResult:
         objects = HARNESS / "obj"
         objects.mkdir(exist_ok=True)
         command = [str(cl), "-nologo", "-TC", "-O2", "-W4", "-WX",
+                   # The default already, and stated so the intent is
+                   # visible: /fp:precise does not contract to FMA in C on
+                   # x64, which the bit-for-bit comparison depends on. See
+                   # -ffp-contract=off on the unix path.
+                   "-fp:precise",
                    # Silences MSVC deprecating sscanf, and applies to the
                    # harness only: the ported algorithm compiles clean at
                    # -W4 -WX, which is the property worth keeping true.

@@ -8,3 +8,7 @@ idf_component_register(
     SRCS "src/quat.c"
     INCLUDE_DIRS "include"
 )
+
+# No FMA contraction: the LX7 has MADD.S and GCC fuses by default, which would
+# make the device diverge from the host build that was diffed (include/plumb/real.h).
+target_compile_options(${COMPONENT_LIB} PRIVATE -ffp-contract=off)

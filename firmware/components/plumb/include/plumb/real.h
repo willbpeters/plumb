@@ -30,7 +30,11 @@
  *
  * The double column is EXACTLY zero on every operation -- the C reproduces
  * NumPy bit for bit, which is what keeping the arithmetic in the Python's
- * order buys. The float column is about one ulp of single precision (1.19e-07)
+ * order buys. It also requires -ffp-contract=off (set in analysis/tools/
+ * cbuild.py and in this component's CMakeLists.txt): a compiler free to fuse
+ * a*b+c into one FMA changes the rounding, and the ESP32-S3's GCC does so by
+ * default, so without the flag the comparison says nothing about the device.
+ * The float column is about one ulp of single precision (1.19e-07)
  * on everything except twist_angle, where the larger number is the relative
  * metric losing meaning as the angle passes through zero rather than the
  * answer being worse.
