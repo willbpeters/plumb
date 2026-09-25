@@ -167,11 +167,10 @@ def test_vertical_shaft_traces_a_straight_path():
     here is exactly zero, so this is the test that proves the arc is real
     geometry rather than accumulated error -- error would not vanish here.
 
-    The floor is 0.19 mm rather than the 0.09 mm it was before the pivot offset
-    was estimated, and the reason is worth stating: the arc is now built from
-    `r + d`, and the small cross-shaft error in `d` puts a little lateral
-    motion into a stroke that has none. It is a fifth of a millimetre against a
-    3 mm straight-path threshold, and the classification is unaffected.
+    The floor is 0.003 mm. It was 0.19 mm while the pivot fit carried a small
+    cross-shaft error in `d` -- the arc is built from `r + d`, so that error
+    put lateral motion into a stroke that has none -- and the velocity-form fit
+    removed it (plumb/pivot.py).
     """
     _, _, result = run_stroke(StrokeParams(lie_angle_deg=0.0))
     assert result.path_arc_m < 3e-4
@@ -298,10 +297,14 @@ def test_path_arc_magnitude_meets_the_spec_target():
     three unknowns against a thousand samples rather than a thousand
     independent guesses, and the noise averages down instead of dominating.
 
-    Measured against ground truth over the same window: 0.8% to 4.8% of truth
-    across arc types and lie angles (1.3% to 5.1% before the arc was measured
-    over the motion only), against the 10% target in parent spec section 3. THIS METRIC NOW MEETS SPEC, noiselessly. It has not been
-    measured against a real stroke, because there is no logged corpus yet.
+    Measured against ground truth over the same window: 0.996 to 1.002 of
+    truth across arc types and lie angles, against the 10% target in parent
+    spec section 3. (It was 1.3% to 5.1% over, then 0.8% to 4.8% once the arc
+    was measured over the motion only; the rest was the acceleration-form
+    pivot fit's filter bias.) THIS METRIC MEETS SPEC, noiselessly and -- see
+    test_arc_under_noise_does_not_depend_on_putter_type -- on the session mean
+    under noise. It has not been measured against a real stroke, because there
+    is no logged corpus yet.
     """
     traj, pipe, result = run_stroke(StrokeParams())
     arc_true, _ = true_face_path(traj, pipe)
@@ -310,7 +313,7 @@ def test_path_arc_magnitude_meets_the_spec_target():
 
 
 def test_path_arc_barely_depends_on_putter_type():
-    """Invariant 1, applied to path -- and a trade made with open eyes.
+    """Invariant 1, applied to path.
 
     Path is swing geometry, not putter geometry. A zero-torque putter and a
     blade swung on the same plane trace the same path and differ only in how
@@ -318,26 +321,13 @@ def test_path_arc_barely_depends_on_putter_type():
     would be reading face rotation into a metric that has nothing to do with
     it.
 
-    THE MEASURED SPREAD GREW, from 0.08% to 1.69%, when the pivot offset began
-    to be estimated (1.71% since the arc is measured over the motion only). It is not a putter-type prior -- nothing normalises
-    against expected rotation and no threshold keys off rotation amplitude, see
-    plumb/pivot.py -- but it is a real dependence, and it is recorded here
-    rather than tucked away.
-
-    Where it comes from: the pivot fit low-passes the angular rate before
-    building its design matrix, which is what stops noise in the derivative
-    from collapsing the estimate. The matrix is quadratic in that rate, so
-    filtering the rate is not identical to filtering the equation, and the
-    small residual bias depends on the rate's spectrum -- which differs between
-    a putter whose face rotates through the stroke and one whose face does not.
-    Measured on the pivot offset itself: -0.5681 m for a straight-face stroke
-    against -0.5556 m for an arced one, both against a true -0.55.
-
-    What it costs, in the units that matter: 0.4 mm of spread on a 24 mm arc.
-    Against the alternative -- no pivot estimate at all and 39% of the arc
-    missing -- it is a good trade, and it stays well inside the 10% accuracy
-    parent spec section 3 asks of this metric. The screen does not show arc
-    magnitude at all; it shows the shape.
+    Measured spread: 0.37%, 0.09 mm on a 24 mm arc. It grew from 0.08% to
+    1.69% when the pivot offset began to be estimated, because the
+    acceleration-form fit low-passed the rate before squaring it, and that
+    bias depended on the rate's spectrum -- which differs between a face that
+    rotates and one that does not. The velocity form has no filter; the spread
+    went back down. Under noise the same fix took the arced putter from 1.142
+    of truth to 1.010, level with the straight putter's 1.006.
     """
     arcs = {}
     for arc in ArcType:
@@ -348,55 +338,38 @@ def test_path_arc_barely_depends_on_putter_type():
     mean_arc = sum(arcs.values()) / len(arcs)
 
     # Both bounds are measured rather than chosen. The relative one catches any
-    # real growth in the dependence -- it is 1.5x the measured 1.69%, where the
-    # old bound was 6x a 0.08% quantization floor. The absolute one is the
+    # real growth in the dependence -- 1.5x the measured 0.37% (it was 1.5x
+    # 1.69% while the filter bias was there). The absolute one is the
     # check that actually protects the golfer: half a millimetre is below
     # anything anyone could act on, and it holds even if a future change makes
     # the arc itself larger.
-    assert spread < 0.025 * mean_arc, (
+    assert spread < 0.0056 * mean_arc, (
         f"path arc varies with putter type by {100 * spread / mean_arc:.3f}%: {arcs}"
     )
     assert spread < 0.0005, f"putter-type spread is {1000 * spread:.3f} mm"
 
 
 def test_the_pivot_converges_when_calibrated_across_strokes():
-    """How this metric has to be delivered, and what still stands in the way.
+    """How the pivot is delivered: one stroke is good, a session is better.
 
-    A single stroke at this board's measured 0.28 dps noise floor recovers the
-    pivot to about 17%, and the arc that follows lands anywhere from 8% under
-    truth to 84% over -- worse per stroke than the systematic 39% shortfall it
-    replaced, because that shortfall was at least consistent. Sharing one
-    PivotCalibration across strokes sums their normal equations, which is
-    inverse-variance weighting for free: 12% after two strokes, 2.4% after
-    five. The pivot is a property of the golfer, learned over a session, not of
-    the stroke -- which is where parent spec section 8.4 already put it.
+    History, because the numbers moved a long way. The first estimator fit the
+    ACCELERATION relation, which needs the rate differentiated; at 0.28 dps one
+    stroke recovered the pivot to about 17% and only a five-stroke calibration
+    got it to 2.4% -- and even then the arced putter's arc read 1.142 of truth,
+    because noise in the design matrix shrank the fit's weakest direction
+    (errors-in-variables; see plumb/pivot.py for the oracles that pinned it).
 
-    WHAT THIS DOES NOT YET FIX, measured at 0.28 dps over strokes 5 to 10:
+    The velocity form needs no derivative, fits the start velocity rather than
+    trusting one noisy sample for it, and subtracts the gyro noise's measured
+    contribution. Measured at 0.28 dps plus 1.5 dps bias, arced putter, lie 5,
+    |d - truth| over the FULL vector, not just the component along the shaft:
 
-        lie    no pivot (before)    calibrated
-         5     0.665 of truth       1.244
-        20     0.620                1.086
+        single strokes      3-34 mm
+        calibrated, k >= 2  1.4-5.7 mm
 
-    The systematic scale error is gone. What was left was an overshoot, first
-    blamed wholly on peak-to-peak collecting the random walk. Taken apart on
-    2026-09-25 over sixteen strokes rather than six, it is two things:
-
-    - Track wander while the face is still, mainly through the chord's end
-      point. Fixed by measuring over the motion only (see _compute): the
-      straight putter at lie 5 went from [0.788, 1.353] of truth to
-      [0.856, 1.203]. With the TRUE pivot the pure peak-to-peak bias is +0.6%
-      on the mean; what remains at lie 5 is spread, not bias -- a 6 mm arc
-      against a ~0.5 mm random walk.
-    - The pivot fit's weakly observed direction. On the arced putter the face
-      turns with the swing, so the rotation axis tilts ~19 deg off body Y and
-      the fit's weakest eigen-direction carries a real share of `d`. It is
-      mis-estimated even noiselessly (+5% arc), and a 0.15 deg attitude tilt
-      leaking gravity into the fit moves it far more (+7.6%). The arced putter
-      still reads 1.155 of truth at lie 5 and 1.064 at lie 20. Open in
-      HANDOFF.md.
-
-    So this test asserts what is true -- the pivot converges -- and not that
-    the arc meets the 10% target under noise, because it does not.
+    Asserted on the whole vector because the cross-shaft components are the
+    ones that turn face rotation into fake path; the old test checked only
+    offset[2] and would have passed with all of the arced putter's error in it.
     """
     from plumb.pivot import PivotCalibration
     from plumb.sensor import SensorParams, simulate
@@ -404,21 +377,69 @@ def test_the_pivot_converges_when_calibrated_across_strokes():
 
     sensor = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
                           gyro_bias_dps=1.5)
-    params = StrokeParams(lie_angle_deg=5.0)
+    params = StrokeParams(lie_angle_deg=5.0, arc_type=ArcType.ARCED)
+    truth = np.array([0.0, 0.0, -params.pivot_offset_m])
     calibration = PivotCalibration()
-    after = {}
-    for stroke, seed in enumerate(range(1, 11), start=1):
+    single, calibrated = [], []
+    for seed in range(1, 11):
         traj = generate(params)
         out = simulate(traj, sensor, seed=seed)
         pipe = Pipeline(Thresholds(), out.full_scale,
                         pivot_calibration=calibration)
         for i in range(len(traj.time)):
             pipe.step(out.gyro_counts[i], out.accel_counts[i])
-        after[stroke] = calibration.solve().offset[2]
+        single.append(np.linalg.norm(pipe._pivot.solve().offset - truth))
+        calibrated.append(np.linalg.norm(calibration.solve().offset - truth))
 
+    print(f"\n  |d - truth| mm, single strokes: "
+          f"{' '.join(f'{1e3 * e:.1f}' for e in single)}"
+          f"\n  calibrated after each stroke:    "
+          f"{' '.join(f'{1e3 * e:.1f}' for e in calibrated)}")
     assert calibration.strokes == 10
-    one = abs(after[1] + 0.55) / 0.55
-    five = abs(after[5] + 0.55) / 0.55
-    assert one > 0.10, f"one stroke should be poor, was {100 * one:.1f}%"
-    assert five < 0.05, f"five strokes should converge, was {100 * five:.1f}%"
-    assert abs(after[10] + 0.55) / 0.55 < 0.08
+    assert max(single) < 0.05
+    assert max(calibrated[1:]) < 0.01
+
+
+def test_arc_under_noise_does_not_depend_on_putter_type():
+    """Invariant 1 for path, under the noise the board actually has.
+
+    The same session -- same seeds, so the same noise -- is played with a
+    straight-face putter and an arced one. Their true arcs are identical (path
+    is swing geometry), so their measured arcs must be too, and both must agree
+    with the generator.
+
+    They did not. The arced putter read 1.142 of truth at lie 5 against the
+    straight one's 1.010, because face rotation tilts the rotation axis ~19 deg
+    off body Y and the pivot fit's weakest direction then carries a real share
+    of `d` -- which gyro noise in the design matrix shrank toward zero
+    (errors-in-variables), turning face rotation into sideways face travel.
+    Oracles pinned it: the true angular rate in the fit alone took the arced
+    putter to 1.049; the true acceleration alone changed nothing (1.137).
+
+    Strokes 5 to 16, so the pivot calibration has had four strokes to settle.
+    The per-stroke spread at lie 5 is ~+/-15% (a 6 mm arc against a ~0.5 mm
+    random walk in the track), so the bound is on the session mean.
+    """
+    from plumb.pivot import PivotCalibration
+
+    sensor = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
+                          gyro_bias_dps=1.5)
+    means = {}
+    for arc in (ArcType.STRAIGHT, ArcType.ARCED):
+        calibration = PivotCalibration()
+        ratios = []
+        for seed in range(1, 17):
+            traj = generate(StrokeParams(lie_angle_deg=5.0, arc_type=arc))
+            out = simulate(traj, sensor, seed=seed)
+            pipe = Pipeline(Thresholds(), out.full_scale,
+                            pivot_calibration=calibration)
+            result = None
+            for i in range(len(traj.time)):
+                result = pipe.step(out.gyro_counts[i], out.accel_counts[i]) or result
+            if seed >= 5:
+                ratios.append(result.path_arc_m / true_face_path(traj, pipe)[0])
+        means[arc.name] = float(np.mean(ratios))
+
+    print(f"\n  session-mean arc / truth at lie 5, 0.28 dps: {means}")
+    assert abs(means["ARCED"] - 1.0) < 0.05, means
+    assert abs(means["ARCED"] - means["STRAIGHT"]) < 0.03, means

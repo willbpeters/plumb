@@ -493,6 +493,21 @@ and arc magnitude is reported alongside the classification.
 Direction classification is the primary output and is held to a 95% agreement target.
 Arc magnitude is secondary and held to 10%.
 
+*Amended 2026-09-25.* `v_face = ω × r` assumes the sensor does not translate. It does: the
+stroke rotates about the golfer's hands, so the face travels on `r + d`, where `d` runs from
+the pivot to the sensor — 1.4 m against the 0.85 m lever arm, and exactly the 61% arc shortfall
+measured on the harness. `d` is estimated per stroke by least squares, from the velocity form
+of the rigid-body relation, `∫ R a dt = R [ω]ₓ d − v₀`, with `v₀` eliminated by centring and
+the gyro noise's contribution to the design matrix (measured in the ADDRESS stillness window)
+subtracted. It is accumulated across strokes as a per-golfer calibration. The acceleration
+form, `a = ω̇ × d + ω × (ω × d)`, was implemented first and replaced: differentiating the gyro
+put enough noise into the design matrix to bias the least-observed direction of `d`, which on
+an arced putter turned face rotation into sideways path (1.142 of true arc against 1.010 for a
+straight putter at lie 5, 0.28 dps; now 1.010 and 1.006). The same argument applies to §8.4's
+Version 2, which is written in the acceleration form. Arc is measured over the motion only,
+from stroke onset to the start of the follow-through hold, not over the stillness around it.
+Measured on the synthetic harness only; not yet on a real stroke.
+
 ### 7.5 Tempo
 
 ```

@@ -6,79 +6,77 @@ dropped. The sensor does translate: a putting stroke rotates about the hands,
 not about the butt of the grip, so the face swings on `r + d` where `d` runs
 from the pivot to the sensor. With the harness's defaults that is 1.4 m against
 the 0.85 m assumed, and 0.85 / 1.4 = 0.607 -- which is exactly the 61% arc
-shortfall pinned in test_pipeline.py. The diagnosis was already written down;
-what was missing was a way to measure `d`.
+shortfall once pinned in test_pipeline.py.
 
-Why this way. Estimating the pivot per sample was tried and abandoned because
-it needs the gyro differentiated, which amplifies noise by 1/dt and collapses
-around 0.1 dps -- this sensor's own floor. But the relation
+THE RELATION USED. A point fixed in a body rotating about a fixed pivot moves
+with world velocity `R [omega]x d`, where R is the attitude. The accelerometer
+measures the derivative of that, so integrating it in the world frame gives
 
-    a_body = omega_dot x d + omega x (omega x d)                    (spec 2)
+    v(t) = integral of R a_body dt  =  R [omega]x d  -  v0                (1)
 
-is LINEAR in d, so a stroke's worth of samples is an over-determined linear
-system rather than a sequence of independent guesses. Three unknowns against
-roughly a thousand samples: the noise that defeated the per-sample estimate
-averages down by the square root of the sample count, and the centripetal term
-carries no derivative at all. At the top of a downswing that term alone is
-around 6 m/s^2, against an accelerometer resolution of 0.005.
+which is LINEAR in d, with v0 the (unknown) velocity when the fit started. A
+stroke's worth of samples is an over-determined system of three unknowns --
+four with v0, which is eliminated by centring both sides on their means, so no
+single sample anchors anything.
 
-What it cannot see, and why that needs more than a rank test. A rotation about
-an axis says nothing about the offset ALONG that axis -- an offset parallel to
-omega produces no acceleration. For a single-axis swing the system is exactly
-rank two and the minimum-norm answer leaves that component at zero, which is
-right.
+WHY NOT THE ACCELERATION FORM. The first version fit the derivative of (1),
 
-The dangerous case is the one in between. A stroke that rotates the face a
-little excites the third direction a little, so its eigenvalue is small but not
-zero, and a rank test passes it. Measured on the harness: a near-zero-rotation
-putter produced an offset of 1.04 m ACROSS the shaft, against a true zero. The
-arc survived it, because the same near-degeneracy that let the component be
-wrong also made the answer insensitive to it -- but a metre of nonsense sitting
-in a reported quantity is not something to leave in place because it happened
-not to matter here.
+    a_body = omega_dot x d + omega x (omega x d),
 
-So each eigen-direction is kept only if its coefficient is larger than its own
-uncertainty, estimated from the fit's residual. That is a measurement of what
-the stroke actually observed rather than a threshold on what it ought to look
-like, and it is self-calibrating: a quieter sensor keeps more directions.
+which needs omega differentiated. Differentiating white noise amplifies it,
+so the rate was low-passed first -- and that bought a chain of problems, each
+measured on the arced putter at lie 5, where the arc is smallest and the
+errors show:
 
-Why the angular rate is filtered first. The noise here is in the DESIGN matrix,
-not only in the measurement: omega and omega_dot both build K. Least squares
-with a noisy design matrix is biased toward zero -- feed it the raw signal at
-this board's 0.28 dps floor and the estimate collapses to a few millimetres,
-which is exactly the collapse the per-sample attempt reported. The centripetal
-term is not the problem: 0.005 rad/s of noise against a 3.5 rad/s peak is 0.14%.
-The derivative is, because differencing white noise scales it by sqrt(2)/dt,
-which at 896.8 Hz turns 0.005 rad/s into 6 rad/s^2 against a true peak near 20.
+  - The filter could not be applied consistently. K is quadratic in the rate,
+    so K(LPF[omega]) is not LPF[K], and the filters started mid-stroke. ~1% on
+    the offset noiselessly, projected onto the weakest direction: +5% arc.
+  - Errors-in-variables. Noise in the DESIGN matrix biases least squares
+    toward zero, hardest in the least-excited direction. On the arced putter
+    face rotation tracks the swing, so the rotation axis tilts ~19 deg off
+    body Y and the weakest direction carries a real 0.18 m share of d; the
+    derivative's noise power per sample (~0.006) matched that direction's
+    signal (~0.006) and shrank it by half. The fake remainder sits off the
+    shaft axis, where face rotation turns it into sideways face travel: 1.142
+    of true arc against 1.010 for a straight putter on the same noise.
+    Oracles pinned it -- the true rate in the fit took it to 1.049, the true
+    acceleration changed nothing (1.137).
 
-So omega is low-passed before K is built. A putting stroke is a ~1.5 s motion
-whose content sits well under 20 Hz -- the same reasoning that set the gyro's
-hardware LPF -- so this costs no signal. The filter is one pole and causal, and
-it is used ONLY for the pivot fit: filtering the rate that feeds attitude
-integration would delay the attitude and bias the face angle.
+The velocity form needs no derivative and no filter, and is exact on
+noiseless data (0.997-1.002 of true arc for every putter type).
 
-BOTH sides are filtered, and that is not symmetry for its own sake: filtering
-only K leaves K lagging b by the filter's phase, which showed up as a 1.5% bias
-on otherwise perfect data. It is not exact, though. `d` is a constant, so
-`LPF[K d] = LPF[K] d` -- but what is built here is K from the filtered rate,
-and the centripetal term is quadratic in it, so K(LPF[omega]) is not LPF[K].
-That, together with the filters starting mid-stroke (the fit is fed from
-BACKSWING entry, not from rest), is the ~1% left on noiseless data.
+TWO THINGS IT STILL HAS TO HANDLE.
 
-Filtering the built matrix instead was tried (2026-09-25), and measured on the
-test_pivot harness, mean of five seeds, error in the recovered offset:
+  1. The start. Subtracting R0 [omega_0]x -- one noisy sample -- puts that
+     sample's noise into every row for the whole stroke, a constant error no
+     filter removes (low-passing made it WORSE: 1.153 -> 1.224 as the corner
+     fell). Treating v0 as unknown removes it: 1.153 -> 1.079.
+  2. Errors-in-variables again, now from the raw rate: the design is
+     R [omega + n]x, whose noise contributes E[Nt N] = tr(S) I - S per sample
+     for a gyro noise covariance S -- whatever the noise spectrum, since it is
+     a per-sample second moment, so the hardware LPF does not invalidate it.
+     S is MEASURED, in the same address stillness window that nulls the bias,
+     and its expected contribution is subtracted from the normal equations
+     ("corrected least squares"). 1.079 -> 1.002, and 0.999 at 0.56 dps.
 
-    fc 2.0 Hz                          noiseless   0.28 dps   2.8 dps
-    rate filtered (this code)            0.98%       3.15%     22.7%
-    matrix filtered, started mid-stroke  3.70%       2.43%     22.8%
-    matrix filtered, started from rest   0.04%       6.59%     24.2%
+WHAT IT CANNOT SEE. An offset along the rotation axis produces no motion, so a
+single-axis swing is exactly rank two and the minimum-norm answer leaves that
+component at zero, which is right. The dangerous case is a direction that is
+nearly unobserved: after the noise is subtracted, what is left there is the
+difference of two similar numbers. So a direction is kept only if its
+corrected energy clears SIGNIFICANCE_SIGMAS times the uncertainty of the noise
+estimate itself -- a statistic of this stroke's sample counts, not a tuned
+threshold. Measured on one stroke at 0.28 dps: the straight putter's swing
+axis has raw energy 0.039 against a noise share of 0.040-0.046 (rejected);
+the arced putter's weakest direction has 0.11 against 0.04 (kept).
 
-Exact on noiseless data only when every filter starts from rest, which the
-pipeline cannot do, and no better at this board's noise floor either way. The
-rate filter stays.
+Nothing here keys off face rotation, so nothing carries a putter-type prior
+(invariant 1). The pivot is swing geometry: where the golfer's hands are.
 
-Nothing here keys off face rotation, so nothing here carries a putter-type
-prior (invariant 1). The pivot is swing geometry: where the golfer's hands are.
+PORT NOTE. Centring is done from running sums (sum M^T M - S^T S / n), which
+cancels: fine in double, but in single precision the weakest eigenvalue
+(~0.07 against sums of ~300) keeps only ~4 significant digits. Use running
+means (Welford) in the C, and measure it with the differential harness.
 """
 
 from dataclasses import dataclass
@@ -90,33 +88,21 @@ import numpy as np
 # about which directions were observed is the significance test below.
 SINGULAR_VALUE_CUTOFF = 1e-12
 
-# How many standard errors a direction's coefficient must clear to be reported.
-# Two is the usual bar for "distinguishable from nothing", and the result is
-# not sensitive to it: the observed directions clear it by orders of magnitude
-# and the unobserved ones miss by orders of magnitude.
-SIGNIFICANCE_SIGMAS = 2.0
+# How many standard errors a direction must clear to be reported -- both its
+# corrected energy against the noise estimate's uncertainty, and its
+# coefficient against its own error bar. This is a false-alarm rate, chosen,
+# not fitted. Measured over 40 straight-putter strokes at 0.28 dps, the
+# swing axis (truly unobservable) scores mean +0.30, SD 0.78 -- the
+# uncertainty estimate is if anything conservative -- and one stroke in 40
+# cleared 2.0 (at 2.26) and reported 0.17 m along an axis nothing measured,
+# which is the 2.3% a one-sided 2-sigma test predicts. At 3 the rate is 0.13%.
+# What it could cost: the arced putter's weakest direction, the one that
+# matters, scores ~20, so nothing measurable. Revisit on the Phase 2 corpus,
+# where the noise is not white.
+SIGNIFICANCE_SIGMAS = 3.0
 
-# Below this many samples there is no averaging to speak of and the estimate is
-# the per-sample one that was already shown not to work.
+# Below this many samples there is no averaging to speak of.
 MINIMUM_SAMPLES = 50
-
-# Low-pass corner for the rate that builds K, in Hz. Not a detection threshold:
-# it is a filter design, and it sits on a trade-off that was measured rather
-# than argued. Error in the recovered offset, mean of five seeds:
-#
-#     fc Hz   noiseless   0.28 dps   2.8 dps      <- gyro noise
-#      0.75      17.13%     10.03%     7.65%
-#      1.50       1.24%      3.31%    17.01%
-#      2.00       0.98%      3.15%    22.54%      <- chosen
-#      3.00       1.82%      5.18%    33.70%
-#      20.0       0.34%     20.79%    93.22%
-#
-# Below about 1.5 Hz the filter starts eating the stroke itself; above 3 Hz the
-# derivative's noise starts biasing the fit toward zero. 0.28 dps is this
-# board's measured resting floor (docs/bringup-results.md), so that is the
-# column that decides it, and 1.5 to 3 Hz all clear the 10% arc target there.
-# The choice is not knife-edge, which is the point of showing the table.
-RATE_FILTER_HZ = 2.0
 
 
 def skew(v) -> np.ndarray:
@@ -131,151 +117,197 @@ def skew(v) -> np.ndarray:
 class PivotSolution:
     offset: np.ndarray          # d, from pivot to sensor, body frame, metres
     rank: int                   # 3 if the stroke excited every direction
-    residual_fraction: float    # unexplained share of the measured acceleration
+    residual_fraction: float    # unexplained share of the measured velocity
     samples: int
 
 
-def solve_normal_equations(ata, atb, btb: float, samples: int
-                           ) -> PivotSolution | None:
-    """Least-squares offset from accumulated normal equations.
+@dataclass
+class NormalEquations:
+    """One stroke's evidence, or a session's: everything the solve needs.
 
-    Separate from the estimator because the same arithmetic serves one stroke
-    and a hundred: summing the normal equations across strokes IS
-    inverse-variance weighting, with no extra machinery and no stored history.
+    `noise` is the expected contribution of gyro noise to `ata`, already
+    included in it and to be subtracted; `noise_variance` is the variance of
+    that estimate, in the same units squared. Summing across strokes is
+    inverse-variance weighting for the signal and adds the variances for the
+    noise estimate, so a session is just the elementwise sum.
     """
-    if samples < MINIMUM_SAMPLES or btb <= 0.0:
+
+    ata: np.ndarray
+    atb: np.ndarray
+    btb: float
+    samples: int
+    noise: np.ndarray
+    noise_variance: float
+
+    @staticmethod
+    def empty() -> "NormalEquations":
+        return NormalEquations(np.zeros((3, 3)), np.zeros(3), 0.0, 0,
+                               np.zeros((3, 3)), 0.0)
+
+    def __add__(self, other: "NormalEquations") -> "NormalEquations":
+        return NormalEquations(self.ata + other.ata, self.atb + other.atb,
+                               self.btb + other.btb,
+                               self.samples + other.samples,
+                               self.noise + other.noise,
+                               self.noise_variance + other.noise_variance)
+
+
+def solve_normal_equations(eq: NormalEquations) -> PivotSolution | None:
+    """Least-squares offset, corrected for noise in the design matrix."""
+    if eq.samples < MINIMUM_SAMPLES or eq.btb <= 0.0:
         return None
 
-    # Symmetric and positive semi-definite by construction, so eigh gives the
-    # decomposition without forming a pseudo-inverse of something
-    # ill-conditioned.
-    values, vectors = np.linalg.eigh(ata)
+    corrected = eq.ata - eq.noise
+    # Symmetric by construction, so eigh gives the decomposition without
+    # forming a pseudo-inverse of something ill-conditioned. Not necessarily
+    # positive: subtracting an estimated noise can leave a small negative
+    # eigenvalue in a direction that held nothing but noise.
+    values, vectors = np.linalg.eigh(corrected)
     largest = values.max()
     if largest <= 0.0:
         return None
-    usable = values > SINGULAR_VALUE_CUTOFF * largest
+    noise_sd = np.sqrt(eq.noise_variance)
+    usable = ((values > SINGULAR_VALUE_CUTOFF * largest)
+              & (values > SIGNIFICANCE_SIGMAS * noise_sd))
     if not usable.any():
         return None
 
-    coefficients = (vectors.T @ atb) / np.where(usable, values, 1.0)
-    coefficients = np.where(usable, coefficients, 0.0)
+    safe = np.where(usable, values, 1.0)
+    coefficients = np.where(usable, (vectors.T @ eq.atb) / safe, 0.0)
     offset = vectors @ coefficients
 
-    residual = max(0.0, btb - 2.0 * offset @ atb + offset @ ata @ offset)
+    # Residual of the fit against the RAW design. What the model leaves
+    # unexplained, as a share of what there was to explain.
+    residual = max(0.0, eq.btb - 2.0 * offset @ eq.atb
+                   + offset @ eq.ata @ offset)
 
-    # Standard error per direction: sigma_b / sqrt(lambda). Three equations per
-    # sample, three parameters. A direction the stroke barely excited has a
-    # small lambda and therefore a large error bar, which is exactly the
-    # statement that it was not measured.
-    dof = max(1, 3 * samples - 3)
+    # Standard error per direction: sigma_b / sqrt(lambda). Optimistic --
+    # the rows of an integrated signal are not independent -- which is why it
+    # is the second test and not the first.
+    dof = max(1, 3 * eq.samples - 3)
     sigma_b = np.sqrt(residual / dof)
-    errors = np.where(usable, sigma_b / np.sqrt(np.where(usable, values, 1.0)),
-                      np.inf)
+    errors = np.where(usable, sigma_b / np.sqrt(safe), np.inf)
     significant = usable & (np.abs(coefficients) > SIGNIFICANCE_SIGMAS * errors)
 
     return PivotSolution(
         offset=vectors[:, significant] @ coefficients[significant],
         rank=int(significant.sum()),
-        residual_fraction=float(residual / btb),
-        samples=samples,
+        residual_fraction=float(residual / eq.btb),
+        samples=eq.samples,
     )
 
 
 class PivotCalibration:
     """The pivot offset accumulated across strokes, for one golfer.
 
-    Measured on the harness at this board's 0.28 dps noise floor, a SINGLE
-    stroke recovers the offset to about 17%, and the arc that follows from it
-    lands anywhere between 8% under truth and 84% over. That is not a usable
-    per-stroke number, and it is the same conclusion the earlier attempt
-    reached -- reached again from the other direction, because this estimator
-    is not biased, it is noisy.
+    One stroke carries only so much information about d, however good the
+    estimator; summing the normal equations across strokes is
+    inverse-variance weighting for free, with no stored history. The pivot is
+    a property of the golfer to be learned over a session, not of the stroke
+    -- which is where parent spec section 8.4 put auto-calibration.
 
-    Summed across strokes it converges: 12% after two, 2.4% after five, and a
-    floor near 5% thereafter set by the filter bias rather than by noise. So
-    the pivot is a property of the golfer to be learned over a session, not a
-    property of the stroke to be measured in one -- which is what parent spec
-    section 8.4 anticipated when it put auto-calibration there rather than in
-    the per-stroke path.
-
-    Costs nine floats and a counter, whatever the session length.
+    Costs a handful of floats and a counter, whatever the session length.
     """
 
     def __init__(self) -> None:
-        self._ata = np.zeros((3, 3))
-        self._atb = np.zeros(3)
-        self._btb = 0.0
-        self.samples = 0
+        self._eq = NormalEquations.empty()
         self.strokes = 0
+
+    @property
+    def samples(self) -> int:
+        return self._eq.samples
 
     def fold(self, estimator: "PivotEstimator") -> None:
         """Add one completed stroke's evidence."""
         if estimator.samples < MINIMUM_SAMPLES:
             return
-        self._ata += estimator._ata
-        self._atb += estimator._atb
-        self._btb += estimator._btb
-        self.samples += estimator.samples
+        self._eq = self._eq + estimator.normal_equations()
         self.strokes += 1
 
     def solve(self) -> PivotSolution | None:
-        return solve_normal_equations(self._ata, self._atb, self._btb,
-                                      self.samples)
+        return solve_normal_equations(self._eq)
 
 
 class PivotEstimator:
     """Accumulates the normal equations for `d`, one sample at a time.
 
-    Streaming, like everything else the firmware runs: nine accumulators and a
-    three-vector, no history, no lookahead. The stroke is over before the
-    system is solved, but nothing is stored while it runs.
+    Streaming, like everything else the firmware runs: running sums, the
+    integrated velocity and the previous acceleration -- no history, no
+    lookahead. The stroke is over before the system is solved, but nothing
+    is stored while it runs.
     """
 
-    def __init__(self, dt: float, filter_hz: float = RATE_FILTER_HZ) -> None:
+    def __init__(self, dt: float) -> None:
         self.dt = dt
-        # One-pole low pass: y += alpha (x - y). tau = 1 / (2 pi fc).
-        tau = 1.0 / (2.0 * np.pi * filter_hz)
-        self._alpha = dt / (tau + dt)
-        self._filtered = None
+        self._velocity = np.zeros(3)
         self._previous = None
-        self._filtered_accel = None
-        self._ata = np.zeros((3, 3))
-        self._atb = np.zeros(3)
-        self._btb = 0.0
+        self._mm = np.zeros((3, 3))
+        self._my = np.zeros(3)
+        self._yy = 0.0
+        self._sum_m = np.zeros((3, 3))
+        self._sum_y = np.zeros(3)
         self.samples = 0
+        self._noise_cov = np.zeros((3, 3))
+        self._noise_samples = 0
 
-    def update(self, omega, a_body) -> None:
+    def set_noise(self, covariance, samples: int) -> None:
+        """The gyro noise covariance, per sample, in (rad/s)^2, as measured
+        over `samples` samples of stillness. The pipeline supplies it from the
+        same window that nulls the bias. Without it the fit is uncorrected,
+        which is exact on noiseless data and biased on noisy data."""
+        self._noise_cov = np.asarray(covariance, dtype=float)
+        self._noise_samples = int(samples)
+
+    def update(self, omega, a_body, rotation) -> None:
         """One sample.
 
         `a_body` is the sensor's own acceleration with gravity already removed
         -- the accelerometer reading minus the gravity direction rotated into
         the current body frame. Getting that subtraction wrong leaks up to
         9.81 m/s^2 into a signal of a few, so it is the caller's job and the
-        caller has the attitude.
-
-        The angular rate is filtered and differentiated here rather than by the
-        caller, so that a caller cannot pass the unfiltered rate and quietly
-        get an estimate biased to zero.
+        caller has the attitude. `rotation` is that attitude as a matrix,
+        body to the address frame.
         """
-        omega = np.asarray(omega, dtype=float)
-        a_body = np.asarray(a_body, dtype=float)
-        if self._filtered is None:
-            self._filtered = omega.copy()
-            self._previous = omega.copy()
-            self._filtered_accel = a_body.copy()
-            return
-        self._previous = self._filtered
-        self._filtered = self._filtered + self._alpha * (omega - self._filtered)
-        self._filtered_accel = (self._filtered_accel
-                                + self._alpha * (a_body - self._filtered_accel))
-        omega_dot = (self._filtered - self._previous) / self.dt
+        a_world = rotation @ np.asarray(a_body, dtype=float)
+        if self._previous is not None:
+            # Trapezoidal, for the same reason attitude is: the rectangle rule
+            # puts a half-sample lag between the velocity and the design.
+            self._velocity = (self._velocity
+                              + 0.5 * (a_world + self._previous) * self.dt)
+        self._previous = a_world
 
-        k = skew(omega_dot) + skew(self._filtered) @ skew(self._filtered)
-        b = self._filtered_accel
-        self._ata += k.T @ k
-        self._atb += k.T @ b
-        self._btb += float(np.dot(b, b))
+        m = rotation @ skew(np.asarray(omega, dtype=float))
+        y = self._velocity
+        self._mm += m.T @ m
+        self._my += m.T @ y
+        self._yy += float(y @ y)
+        self._sum_m += m
+        self._sum_y += y
         self.samples += 1
+
+    def normal_equations(self) -> NormalEquations:
+        """This stroke's equations, centred to eliminate v0 in (1)."""
+        n = self.samples
+        if n == 0:
+            return NormalEquations.empty()
+        ata = self._mm - self._sum_m.T @ self._sum_m / n
+        atb = self._my - self._sum_m.T @ self._sum_y / n
+        btb = self._yy - float(self._sum_y @ self._sum_y) / n
+
+        # Expected contribution of the gyro noise to ata. Centring removes one
+        # sample's worth, hence n - 1. The uncertainty of that estimate is the
+        # relative error of a variance from `_noise_samples` samples, plus the
+        # fluctuation of the noise actually realised in this stroke's n --
+        # both for white noise, which the board's own LPF makes optimistic.
+        # That is recorded in HANDOFF.md as something the Phase 2 corpus has
+        # to check.
+        s = self._noise_cov
+        noise = (n - 1) * (np.trace(s) * np.eye(3) - s)
+        variance = 0.0
+        if self._noise_samples > 1:
+            relative = np.sqrt(2.0 / (self._noise_samples - 1) + 2.0 / n)
+            variance = float((relative * np.trace(noise) / 3.0) ** 2)
+        return NormalEquations(ata, atb, btb, n, noise, variance)
 
     def solve(self) -> PivotSolution | None:
         """This stroke's offset alone, or None when it did not show one.
@@ -283,10 +315,5 @@ class PivotEstimator:
         None rather than a small number: a motionless record contains no
         information about the pivot, and an answer produced from it would have
         a physically plausible magnitude and no physical meaning.
-
-        For a number to actually use, prefer PivotCalibration -- one stroke is
-        not enough at this sensor's noise floor, and the docstring there has
-        the measurements.
         """
-        return solve_normal_equations(self._ata, self._atb, self._btb,
-                                      self.samples)
+        return solve_normal_equations(self.normal_equations())

@@ -52,10 +52,6 @@ class Thresholds:
     accel_gain_static: float = 0.02
     accel_gain_stroke: float = 0.0
     path_straight_arc_m: float = 0.003
-    # Low-pass corner for the rate that feeds the pivot fit, in Hz. See
-    # plumb/pivot.py for the measured trade-off this sits on, and note that it
-    # is a filter design rather than a detection threshold.
-    pivot_filter_hz: float = 2.0
     # Above this unexplained share of the measured acceleration the pivot fit
     # is not describing a rigid rotation about a fixed point, and the path
     # falls back to the sensor's own lever arm.
@@ -120,11 +116,11 @@ class Pipeline:
         # rather than the algorithm -- see test_pipeline.true_face_path.
         self._track_first_n: int | None = None
         self._track_last_n: int | None = None
-        self._pivot = PivotEstimator(self.dt, thresholds.pivot_filter_hz)
-        # Shared across strokes when the caller supplies one. A single stroke
-        # recovers the pivot to only about 17% at this board's noise floor;
-        # five converge to 2.4% (see PivotCalibration). Without one, the path
-        # is computed from this stroke alone and is correspondingly noisy.
+        self._pivot = PivotEstimator(self.dt)
+        # Shared across strokes when the caller supplies one. At this board's
+        # noise floor a single arced stroke recovers the pivot to 3-34 mm and
+        # a calibrated session to 1-6 mm (test_pipeline, the convergence
+        # test). Without one, the path uses this stroke's estimate alone.
         self._pivot_calibration = pivot_calibration
         self._pivot_solution = None
         self._impact_track_index = 0
@@ -188,6 +184,10 @@ class Pipeline:
         if np.all(recent.std(axis=0) < self.th.stillness_gyro_std_rad):
             self.bias = recent.mean(axis=0)
             self.g0 = np.array(self._still_accel).mean(axis=0)
+            # The same window measures the gyro's noise, which the pivot fit
+            # needs to correct for noise in its own design matrix (see
+            # plumb/pivot.py). Measured here, per stroke, not assumed.
+            self._pivot.set_noise(np.cov(recent.T), len(recent))
             self.address_captured = True
             self.q = quat.identity()
             self._enter(State.ADDRESS)
@@ -363,7 +363,7 @@ class Pipeline:
         # let a trigger corrupt a measurement.
         if self.state in (State.BACKSWING, State.DOWNSWING):
             gravity_body = quat.rotate(quat.conjugate(self.q), self.g0)
-            self._pivot.update(corrected, accel - gravity_body)
+            self._pivot.update(corrected, accel - gravity_body, rotation)
 
     def _step_backswing(self, omega, accel) -> None:
         """Detect the transition, and record where the direction actually flipped.
@@ -546,14 +546,17 @@ class Pipeline:
         # Measured on the whole pipeline, calibrated pivot, 0.28 dps plus
         # 1.5 dps bias, strokes 5-20 of a session, arc as a fraction of truth:
         #
-        #     putter, lie       whole window            motion only
-        #     straight, 5       1.041 [0.788, 1.353]    1.018 [0.856, 1.203]
-        #     straight, 20      1.017 [0.954, 1.088]    1.010 [0.974, 1.051]
-        #     arced, 5          1.175 [0.927, 1.495]    1.155 [1.009, 1.348]
-        #     arced, 20         1.070 [1.010, 1.144]    1.064 [1.028, 1.110]
+        #     putter, lie    whole window          motion only           + velocity pivot fit
+        #     straight, 5    1.041 [0.788, 1.353]  1.018 [0.856, 1.203]  1.006 [0.845, 1.190]
+        #     straight, 20   1.017 [0.954, 1.088]  1.010 [0.974, 1.051]  0.999 [0.962, 1.040]
+        #     arced, 5       1.175 [0.927, 1.495]  1.155 [1.009, 1.348]  1.010 [0.850, 1.188]
+        #     arced, 20      1.070 [1.010, 1.144]  1.064 [1.028, 1.110]  0.999 [0.963, 1.040]
         #
-        # Halves the spread; does not touch the arced putter's overshoot,
-        # which is the pivot fit's, not peak-to-peak's (HANDOFF.md). The true
+        # Trimming halves the spread. The arced putter's overshoot was the
+        # pivot fit's (errors-in-variables, plumb/pivot.py), and the third
+        # column is after that fix: every putter type now reads the same. What
+        # remains at lie 5 is spread -- a 6 mm arc against a ~0.5 mm random
+        # walk in the integrated track -- not bias. The true
         # arc over the trimmed window is 0.997 of the whole, because the face
         # still creeps below the follow-through threshold: a small, known cost
         # against a large, random one. Past data only -- both bounds are known
