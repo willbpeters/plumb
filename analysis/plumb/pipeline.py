@@ -96,14 +96,13 @@ class Pipeline:
         self.i_transition = None
         self.i_impact = None
         self._hold = 0
-        self._omega_history: list[np.ndarray] = []
 
         # Back-tracking state. Detecting a stroke boundary always lags the
         # boundary itself; these record where it actually was. Past data only.
         self._last_quiet_n = 0
         self._last_same_sign_n = None
-        self._backswing_axis = None
-        self._backswing_sign = None
+        # Unit swing direction in the plane perpendicular to the shaft.
+        self._backswing_direction = None
         self._prev_magnitude = None
         self._impact_window: list[tuple[int, np.ndarray]] = []
 
@@ -365,16 +364,23 @@ class Pipeline:
             gravity_body = quat.rotate(quat.conjugate(self.q), self.g0)
             self._pivot.update(corrected, accel - gravity_body)
 
-    def _dominant_axis(self) -> int:
-        recent = np.array(self._omega_history[-25:])
-        return int(np.argmax(np.abs(recent).mean(axis=0)))
-
     def _step_backswing(self, omega, accel) -> None:
         """Detect the transition, and record where the direction actually flipped.
 
-        The dominant axis and its backswing sign are frozen on entry rather than
-        recomputed per sample, so a late-stroke wobble cannot silently reinterpret
-        which axis the stroke is about.
+        The swing is measured perpendicular to the shaft, as the onset is, and
+        projected onto the backswing's own direction in that plane. The
+        direction is frozen on entry rather than recomputed per sample, so a
+        late-stroke wobble cannot silently reinterpret what the stroke is about.
+
+        This replaced picking the single largest body axis, which had two
+        faults. It included body Z, the face-rotation axis, so a face opening
+        faster than the shaft swings -- easy at confirmation, when the swing has
+        barely started -- timed the transition off face rotation: measured as a
+        100 ms shift, the whole of the face's lag, going straight into tempo
+        (test_invariant_1_face_rotation_cannot_steer_the_transition). And it
+        averaged "the last 25 samples" of a history that holds exactly one on
+        entry. The projection has neither problem, and needs no choice of axis
+        however the board is clocked in the grip.
 
         The magnitude gate only CONFIRMS a reversal, guarding against sign
         chatter while the rate passes through zero. The instant recorded is the
@@ -385,19 +391,22 @@ class Pipeline:
         Note what is NOT here: nothing keys off how far the face rotated.
         Segmentation is timing, direction and acceleration only (invariant 1).
         """
-        corrected = omega - self.bias
-        self._omega_history.append(corrected)
+        swing = (omega - self.bias)[:2]
 
-        if self._backswing_axis is None:
-            self._backswing_axis = self._dominant_axis()
-            self._backswing_sign = np.sign(corrected[self._backswing_axis])
-            self._last_same_sign_n = self.n
+        if self._backswing_direction is None:
+            # The sample after one above backswing_gyro_rad, so in practice
+            # never zero -- but a zero here would freeze a NaN direction and
+            # the transition could never fire, so wait for one that is not.
+            magnitude = np.linalg.norm(swing)
+            if magnitude > 0.0:
+                self._backswing_direction = swing / magnitude
+                self._last_same_sign_n = self.n
             return
 
-        axis = self._backswing_axis
-        if np.sign(corrected[axis]) == self._backswing_sign:
+        along = float(swing @ self._backswing_direction)
+        if along > 0.0:
             self._last_same_sign_n = self.n
-        elif abs(corrected[axis]) > self.th.transition_gyro_rad:
+        elif -along > self.th.transition_gyro_rad:
             # The rate crossed zero somewhere BETWEEN the last same-sign sample
             # and the next one, so the last same-sign sample is the near edge of
             # the bracket, not the crossing. Taking it directly biases the

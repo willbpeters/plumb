@@ -103,3 +103,56 @@ def test_invariant_1_no_threshold_keys_off_rotation_amplitude():
     assert len(distinct) == 1, (
         f"segmentation changed with face rotation amplitude: {segmentations}"
     )
+
+
+def test_invariant_1_face_rotation_cannot_steer_the_transition():
+    """CLAUDE.md invariant 1, for a face that turns faster than the swing.
+
+    The test above scales face rotation only as far as the generator's arc
+    types go, and at backswing confirmation none of them turns the face faster
+    than the shaft swings: the arced stroke reads (0.05, -12.55, -4.39) deg/s.
+    Backswing is confirmed when the swing has barely started, so the swing
+    component is small there and a face that opens early can outrun it.
+
+    Face rotation is rotation about the shaft, body Z. Here a face-rotation rate
+    is added to that channel only, larger than the swing at confirmation and
+    reversing 100 ms AFTER the swing does. Real faces do not have to reverse
+    with the swing: releasing the face early or late is a stroke
+    characteristic, which is exactly why the transition must not be timed from
+    it. Nothing else changes, so the swing reverses at the same instant and the
+    segmentation must be identical. Timing the transition off body Z moves it
+    by the full 100 ms and puts the error straight into the tempo ratio.
+    """
+    traj = generate(StrokeParams(arc_type=ArcType.STRAIGHT))
+    out = simulate(traj, SensorParams(), seed=1)
+    dt = traj.time[1] - traj.time[0]
+
+    start = traj.time[traj.address_end_index]
+    reversal = traj.time[traj.transition_index] + 0.100
+    end = traj.time[traj.impact_index]
+    peak = np.radians(40.0)
+    t = traj.time
+    face_rate = np.zeros_like(t)
+    opening = (t >= start) & (t < reversal)
+    face_rate[opening] = peak * np.sin(0.5 * np.pi * np.clip((t[opening] - start) / 0.03, 0.0, 1.0))
+    closing = (t >= reversal) & (t < end)
+    face_rate[closing] = -peak * np.sin(np.pi * (t[closing] - reversal) / (end - reversal))
+
+    turned = out.gyro_counts.copy()
+    turned[:, 2] = np.clip(
+        turned[:, 2] + np.round(face_rate / out.full_scale.gyro_rad_per_count),
+        -32768, 32767).astype(np.int16)
+
+    segmentations = {}
+    for label, gyro in (("swing only", out.gyro_counts), ("fast face", turned)):
+        pipe = Pipeline(Thresholds(), out.full_scale)
+        for i in range(len(traj.time)):
+            pipe.step(gyro[i], out.accel_counts[i])
+        segmentations[label] = (pipe.i_backswing_start, pipe.i_transition,
+                                pipe.i_impact)
+
+    shift_ms = (segmentations["fast face"][1] - segmentations["swing only"][1]) * dt * 1e3
+    print(f"\n  transition moved {shift_ms:+.1f} ms under face rotation: {segmentations}")
+    assert segmentations["fast face"] == segmentations["swing only"], (
+        f"face rotation moved the segmentation: {segmentations}"
+    )
