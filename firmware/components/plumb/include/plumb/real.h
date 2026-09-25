@@ -39,9 +39,21 @@
  * metric losing meaning as the angle passes through zero rather than the
  * answer being worse.
  *
- * What is NOT yet measured is what a single-precision build does to a whole
- * stroke, where the attitude integrator accumulates ~1300 of these steps. One
- * ulp per step is not one ulp per stroke. Measure that before switching.
+ * WHOLE STROKE, MEASURED 2026-09-25. One ulp per step is not one ulp per
+ * stroke, so the harness also replays every integrate call the Python pipeline
+ * makes from ADDRESS entry to impact, carrying the attitude in pl_real from
+ * step to step (test_single_precision_across_a_whole_stroke). ~1,850 steps,
+ * three putter types, two face angles, noiseless and at 0.28 dps:
+ *
+ *     double    0 exactly -- the C reproduces the pipeline's face angle
+ *               bit for bit across the whole stroke, not just per call
+ *     float     at most 4.0e-5 deg of face angle, against a 1.0 deg target
+ *
+ * A 30 s address hold (53,719 steps) gave 9.9e-6 deg: it does not walk.
+ * On this evidence single precision is safe for the attitude integrator,
+ * with ~25,000x margin. Not yet covered: forming the rates themselves in
+ * float, and everything pipeline.c will add. Re-measure then; the harness
+ * is built for exactly that.
  */
 
 #ifndef PLUMB_REAL_H

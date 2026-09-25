@@ -36,6 +36,11 @@ static void print_reals(const pl_real *values, int count)
 int main(void)
 {
     char line[LINE_MAX_CHARS];
+    /* Attitude carried between lines by the seq* ops, in pl_real, exactly as
+     * the device will carry it from sample to sample. Every other op starts
+     * from inputs parsed as double; this one never goes back to double, so
+     * rounding compounds across a stroke the way it will on hardware. */
+    pl_real state[4] = {1, 0, 0, 0};
 
     while (fgets(line, sizeof(line), stdin) != NULL) {
         char op[32];
@@ -133,6 +138,29 @@ int main(void)
             for (i = 0; i < 4; i++) { qa[i] = (pl_real)a[i]; }
             pl_quat_to_matrix(qa, out9);
             print_reals(out9, 9);
+
+        } else if (strcmp(op, "seqreset") == 0) {
+            pl_quat_identity(state);
+
+        } else if (strcmp(op, "seqstep") == 0) {
+            if (sscanf(line, "%31s %lf %lf %lf %lf", op,
+                       &v[0], &v[1], &v[2], &dt) != 5) {
+                fprintf(stderr, "bad seqstep: %s", line);
+                return 1;
+            }
+            for (i = 0; i < 3; i++) { qv[i] = (pl_real)v[i]; }
+            pl_quat_integrate(state, qv, (pl_real)dt, state);
+
+        } else if (strcmp(op, "seqtwist") == 0) {
+            pl_real result[5];
+            if (sscanf(line, "%31s %lf %lf %lf", op, &v[0], &v[1], &v[2]) != 4) {
+                fprintf(stderr, "bad seqtwist: %s", line);
+                return 1;
+            }
+            for (i = 0; i < 3; i++) { qv[i] = (pl_real)v[i]; }
+            result[0] = pl_quat_twist_angle(state, qv);
+            for (i = 0; i < 4; i++) { result[i + 1] = state[i]; }
+            print_reals(result, 5);
 
         } else if (strcmp(op, "precision") == 0) {
             printf("%s\n", PL_REAL_NAME);

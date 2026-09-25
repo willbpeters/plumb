@@ -219,3 +219,97 @@ def test_single_precision_divergence_is_measured_not_assumed(portcheck_single,
         "single-precision build agrees with float64 to better than 1e-9, "
         "which means PLUMB_SINGLE_PRECISION did not take effect"
     )
+
+
+def record_stroke_integration(monkeypatch, stroke, sensor, seed):
+    """Every quat.integrate call the Pipeline makes, ADDRESS entry to impact.
+
+    Recorded from the real pipeline on a simulated stroke rather than built
+    by hand, so the replay integrates exactly the rates -- and the
+    accelerometer corrections at address -- that produced its face angle.
+    """
+    from plumb import pipeline as pipeline_module
+    from plumb.pipeline import Pipeline, Thresholds
+    from plumb.sensor import simulate
+    from plumb.trajectory import generate
+
+    calls = []
+    real = quat.integrate
+
+    def spy(q, omega, dt):
+        out = real(q, omega, dt)
+        calls.append((np.asarray(omega, dtype=float), float(dt), out))
+        return out
+
+    monkeypatch.setattr(pipeline_module.quat, "integrate", spy)
+    traj = generate(stroke)
+    out = simulate(traj, sensor, seed=seed)
+    pipe = Pipeline(Thresholds(), out.full_scale)
+    result = None
+    for i in range(len(traj.time)):
+        result = pipe.step(out.gyro_counts[i], out.accel_counts[i]) or result
+    monkeypatch.undo()
+
+    impact = max(j for j, (_, _, q) in enumerate(calls)
+                 if np.array_equal(q, pipe.q_impact))
+    return calls[:impact + 1], pipe.g0, result
+
+
+def replay_face_angle_deg(exe, calls, axis) -> float:
+    """Integrate the recorded stroke in the harness's own precision, never
+    returning to double between steps, and extract the face angle there."""
+    lines = ["seqreset"]
+    lines += [f"seqstep {fmt(w, dt)}" for w, dt, _ in calls]
+    lines.append(f"seqtwist {fmt(axis)}")
+    (row,) = run_c(exe, lines)
+    return float(np.degrees(row[0]))
+
+
+def test_single_precision_across_a_whole_stroke(monkeypatch, portcheck,
+                                                portcheck_single):
+    """What single precision costs the headline number, over a whole stroke.
+
+    The per-operation test above measures one ulp per step. The open question
+    was what ~1,850 accumulated steps do -- each rotating the attitude by
+    1e-4 rad or less, added to quaternion components near 1.0 where one ulp is
+    1.2e-7 -- and one ulp per step is not one ulp per stroke.
+
+    Measured 2026-09-25 over three putter types, two face angles, noiseless
+    and at 0.28 dps with 1.5 dps bias: at most 4.0e-5 deg of face angle,
+    against the +/-1.0 deg target in parent spec section 3. Holding address
+    for 30 s (53,719 steps) did not grow it (9.9e-6 deg): the accelerometer
+    correction at address bounds tilt and the rounding does not walk.
+
+    The double replay is required to be EXACT, which is what makes the single
+    number mean something: it proves the replay integrates precisely what the
+    pipeline integrated, bit for bit, across a stroke rather than per call.
+
+    What this does not cover: the rates here are formed in double. On the
+    device the bias subtraction and trapezoid will be float too -- ~6e-8
+    relative on each rate, about 6e-8 x 12 deg = 7e-7 deg over a stroke.
+    Re-measure when pipeline.c exists.
+    """
+    from plumb.sensor import SensorParams
+    from plumb.trajectory import ArcType, StrokeParams
+
+    noisy = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
+                         gyro_bias_dps=1.5)
+    worst = 0.0
+    for arc in ArcType:
+        for face in (0.0, 2.0):
+            for sensor in (SensorParams(), noisy):
+                calls, g0, result = record_stroke_integration(
+                    monkeypatch, StrokeParams(arc_type=arc,
+                                              face_angle_at_impact_deg=face),
+                    sensor, seed=1)
+                assert replay_face_angle_deg(portcheck, calls, g0) \
+                    == result.face_angle_deg, "the double replay is not faithful"
+                single = replay_face_angle_deg(portcheck_single, calls, g0)
+                worst = max(worst, abs(single - result.face_angle_deg))
+
+    print(f"\n  whole stroke, single precision: worst face-angle difference "
+          f"{worst:.2e} deg over {len(calls)} steps")
+    # Loose on purpose, like the per-operation bound: here to catch a build
+    # that is broken, with 1000x margin still left to the spec target.
+    assert worst < 1e-3
+    assert worst > 0.0, "single precision agreed exactly: the define did not take effect"
