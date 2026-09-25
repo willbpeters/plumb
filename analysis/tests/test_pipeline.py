@@ -4,7 +4,7 @@ import pytest
 from plumb import quat
 from plumb.pipeline import Pipeline, State, Thresholds
 from plumb.sensor import GRAVITY, FullScale, SensorParams, simulate
-from plumb.trajectory import ArcType, StrokeParams, generate
+from plumb.trajectory import SAMPLE_RATE_HZ, ArcType, StrokeParams, generate
 
 
 def run_stroke(stroke: StrokeParams, sensor: SensorParams = SensorParams(), seed: int = 1):
@@ -178,6 +178,51 @@ def test_vertical_shaft_traces_a_straight_path():
     assert result.path_direction == "straight"
 
 
+@pytest.mark.parametrize("sign", [+1, -1])
+def test_sensor_error_after_the_face_stops_does_not_reach_the_arc(sign):
+    """The arc is measured over the motion, not over the stillness after it.
+
+    The face track is the integral of a noisy rate, so it wanders whenever it
+    is being integrated -- including the 0.3 s follow-through hold that
+    confirms the stroke is over, when the real face is not moving at all. The
+    arc used to run to the END of that hold, so the wander moved the chord that
+    defines "forward", and with it every lateral value (open defect 4 in
+    HANDOFF.md).
+
+    Ground truth is known exactly: a rate injected ONLY during that hold moves
+    nothing real, and by then face angle, tempo and the pivot fit are all
+    settled, so the true arc is the undisturbed stroke's and every other output
+    must be identical too. 0.3 dps sits well under the 5 dps follow-through
+    threshold, as real residual noise does. Before the fix it moved a 24 mm arc
+    by -12.1% and +12.9% for the two signs; after it, by 0.000%.
+    """
+    traj = generate(StrokeParams(lie_angle_deg=20.0))
+    out = simulate(traj, SensorParams(), seed=1)
+
+    def run(gyro):
+        pipe = Pipeline(Thresholds(), out.full_scale)
+        result = None
+        for i in range(len(traj.time)):
+            result = pipe.step(gyro[i], out.accel_counts[i]) or result
+        return pipe, result
+
+    clean_pipe, clean = run(out.gyro_counts)
+    done = clean_pipe._track_last_n
+    hold = int(round(Thresholds().followthrough_hold_s * SAMPLE_RATE_HZ))
+    drifting = out.gyro_counts.copy()
+    drifting[done - hold:done, 0] += np.int16(
+        sign * round(np.radians(0.3) / out.full_scale.gyro_rad_per_count))
+    pipe, disturbed = run(drifting)
+
+    print(f"\n  arc {1e3 * clean.path_arc_m:.3f} mm clean, "
+          f"{1e3 * disturbed.path_arc_m:.3f} mm with drift in the hold "
+          f"({100 * (disturbed.path_arc_m / clean.path_arc_m - 1):+.3f}%)")
+    assert pipe._track_last_n == done, "the drift must not move the end of the stroke"
+    assert disturbed.face_angle_deg == clean.face_angle_deg
+    assert disturbed.tempo_ratio == clean.tempo_ratio
+    assert disturbed.path_arc_m == pytest.approx(clean.path_arc_m, rel=1e-3)
+
+
 @pytest.mark.parametrize("lie", [5.0, 10.0, 20.0])
 def test_path_arc_grows_with_lie_angle(lie):
     """A flatter lie swings the head on a more tilted cone and arcs more.
@@ -253,9 +298,9 @@ def test_path_arc_magnitude_meets_the_spec_target():
     three unknowns against a thousand samples rather than a thousand
     independent guesses, and the noise averages down instead of dominating.
 
-    Measured against ground truth over the same window: 1.3% to 5.1% of truth
-    across arc types and lie angles, against the 10% target in parent spec
-    section 3. THIS METRIC NOW MEETS SPEC, noiselessly. It has not been
+    Measured against ground truth over the same window: 0.8% to 4.8% of truth
+    across arc types and lie angles (1.3% to 5.1% before the arc was measured
+    over the motion only), against the 10% target in parent spec section 3. THIS METRIC NOW MEETS SPEC, noiselessly. It has not been
     measured against a real stroke, because there is no logged corpus yet.
     """
     traj, pipe, result = run_stroke(StrokeParams())
@@ -274,7 +319,7 @@ def test_path_arc_barely_depends_on_putter_type():
     it.
 
     THE MEASURED SPREAD GREW, from 0.08% to 1.69%, when the pivot offset began
-    to be estimated. It is not a putter-type prior -- nothing normalises
+    to be estimated (1.71% since the arc is measured over the motion only). It is not a putter-type prior -- nothing normalises
     against expected rotation and no threshold keys off rotation amplitude, see
     plumb/pivot.py -- but it is a real dependence, and it is recorded here
     rather than tucked away.
@@ -332,17 +377,26 @@ def test_the_pivot_converges_when_calibrated_across_strokes():
          5     0.665 of truth       1.244
         20     0.620                1.086
 
-    The systematic scale error is gone. What is left is an OVERSHOOT that grows
-    as the true arc shrinks, and it is a second defect this work uncovered
-    rather than caused: arc is reported as `ptp(lateral)`, and peak-to-peak of
-    an integrated signal is biased upward by noise, because a maximum minus a
-    minimum collects the extremes of the random walk. A 24 mm arc absorbs it at
-    +8.6%; a 6 mm arc does not, at +24%. It was present before and hidden under
-    the shortfall, which was pulling the other way.
+    The systematic scale error is gone. What was left was an overshoot, first
+    blamed wholly on peak-to-peak collecting the random walk. Taken apart on
+    2026-09-25 over sixteen strokes rather than six, it is two things:
 
-    So this test asserts what is now true -- the pivot converges -- and not
-    that the arc meets the 10% target under noise, because it does not. See
-    HANDOFF.md.
+    - Track wander while the face is still, mainly through the chord's end
+      point. Fixed by measuring over the motion only (see _compute): the
+      straight putter at lie 5 went from [0.788, 1.353] of truth to
+      [0.856, 1.203]. With the TRUE pivot the pure peak-to-peak bias is +0.6%
+      on the mean; what remains at lie 5 is spread, not bias -- a 6 mm arc
+      against a ~0.5 mm random walk.
+    - The pivot fit's weakly observed direction. On the arced putter the face
+      turns with the swing, so the rotation axis tilts ~19 deg off body Y and
+      the fit's weakest eigen-direction carries a real share of `d`. It is
+      mis-estimated even noiselessly (+5% arc), and a 0.15 deg attitude tilt
+      leaking gravity into the fit moves it far more (+7.6%). The arced putter
+      still reads 1.155 of truth at lie 5 and 1.064 at lie 20. Open in
+      HANDOFF.md.
+
+    So this test asserts what is true -- the pivot converges -- and not that
+    the arc meets the 10% target under noise, because it does not.
     """
     from plumb.pivot import PivotCalibration
     from plumb.sensor import SensorParams, simulate

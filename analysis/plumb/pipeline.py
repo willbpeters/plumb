@@ -95,6 +95,7 @@ class Pipeline:
         self.i_backswing_start = None
         self.i_transition = None
         self.i_impact = None
+        self.i_motion_end = None
         self._hold = 0
 
         # Back-tracking state. Detecting a stroke boundary always lags the
@@ -459,6 +460,10 @@ class Pipeline:
 
     def _step_followthrough(self, omega, accel):
         if np.linalg.norm(omega - self.bias) < self.th.followthrough_gyro_rad:
+            if self._hold == 0:
+                # Where the motion ended, if this quiet run turns out to hold.
+                # The arc is measured up to here and no further; see _compute.
+                self.i_motion_end = self.n
             self._hold += 1
             if self._hold * self.dt >= self.th.followthrough_hold_s:
                 self._enter(State.DONE)
@@ -528,6 +533,39 @@ class Pipeline:
         g_hat = self.g0 / np.linalg.norm(self.g0)
         horizontal = track - np.outer(track @ g_hat, g_hat)
 
+        # Measure over the MOTION only: from the back-extrapolated onset to the
+        # first sample of the quiet run that ended the stroke. The track is the
+        # integral of a noisy rate, so it wanders whenever it is integrated,
+        # and outside those bounds the real face is not moving -- anything the
+        # track does there is sensor error, and peak-to-peak collects it as arc
+        # (open defect 4). The end matters most: the chord that defines
+        # "forward" used to run to the end of the 0.3 s hold, so wander there
+        # rotated every lateral value -- 0.3 dps in the hold alone moved a
+        # 24 mm arc by 12.9% (test_sensor_error_after_the_face_stops_...).
+        #
+        # Measured on the whole pipeline, calibrated pivot, 0.28 dps plus
+        # 1.5 dps bias, strokes 5-20 of a session, arc as a fraction of truth:
+        #
+        #     putter, lie       whole window            motion only
+        #     straight, 5       1.041 [0.788, 1.353]    1.018 [0.856, 1.203]
+        #     straight, 20      1.017 [0.954, 1.088]    1.010 [0.974, 1.051]
+        #     arced, 5          1.175 [0.927, 1.495]    1.155 [1.009, 1.348]
+        #     arced, 20         1.070 [1.010, 1.144]    1.064 [1.028, 1.110]
+        #
+        # Halves the spread; does not touch the arced putter's overshoot,
+        # which is the pivot fit's, not peak-to-peak's (HANDOFF.md). The true
+        # arc over the trimmed window is 0.997 of the whole, because the face
+        # still creeps below the follow-through threshold: a small, known cost
+        # against a large, random one. Past data only -- both bounds are known
+        # before DONE.
+        first = self._track_first_n
+        start = max(0, int(np.floor(self.i_backswing_start)) - first)
+        stop = len(horizontal)
+        if self.i_motion_end is not None:
+            stop = min(stop, self.i_motion_end - first + 1)
+        horizontal = horizontal[start:stop]
+        impact = self._impact_track_index - start
+
         travel = horizontal[-1] - horizontal[0]
         distance = float(np.linalg.norm(travel))
         if distance == 0.0:
@@ -535,8 +573,8 @@ class Pipeline:
         else:
             lateral = horizontal @ np.cross(g_hat, travel / distance)
             arc = float(np.ptp(lateral))
-            before = lateral[: self._impact_track_index]
-            after = lateral[self._impact_track_index:]
+            before = lateral[:impact]
+            after = lateral[impact:]
             delta = ((after.mean() if len(after) else 0.0)
                      - (before.mean() if len(before) else 0.0))
             if arc < self.th.path_straight_arc_m:
