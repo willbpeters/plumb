@@ -7,7 +7,7 @@ that validates the §7 fusion pipeline with **no hardware at all**.
 
 ```bash
 uv sync
-uv run pytest                   # the algorithm's test suite (78 tests, ~20 s)
+uv run pytest                   # the algorithm's test suite
 uv run python -m plumb.sweep    # the full parameter sweep (~8 min)
 ```
 
@@ -19,6 +19,15 @@ Ground truth is known because it was generated.
 This proves the *math*: quaternion conventions, frame handling, the ground-plane projection,
 bias nulling, segmentation. It says **nothing** about sensor behaviour or mount rigidity.
 Those are measured on hardware (parent spec §5.5 tap test, §10 validation study).
+
+It also proves less about the math than the headline numbers suggest. The 0.0012° and 0.0756°
+face-angle figures below show that the pipeline agrees with the generator's model of a
+stroke, not that it is accurate on real ones, because the generator and the pipeline share
+assumptions a real stroke need not honour: impact always falls at the address swing angle
+(`theta = 0` at impact by construction in `trajectory.generate`); the swing is always about
+body Y; the impact impulse is a symmetric Hanning pulse (`sensor.simulate`); and the pivot and
+sweet spot both lie on the shaft axis (`r = (0, 0, -L)`), where parent spec §8.4 calls for a
+full lever-arm vector. An error that lives in any of those cannot show up here.
 
 The value of doing it first is that when the board is mounted and the numbers look wrong, the
 algorithm is already proven — so the error is the sensor or the mount, which is a

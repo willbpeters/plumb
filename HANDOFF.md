@@ -11,7 +11,8 @@ direct-register experiment ran
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It has been amended four times; see "Spec amendments" below.**
+   of truth. **It carries four marked amendments plus one added section (§1.2.1); see "Spec
+   amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
 
@@ -43,16 +44,26 @@ The blocking defect is gone.
 
 | | |
 |---|---|
-| **Synthetic harness** (`analysis/`) | 80 tests. Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. |
+| **Synthetic harness** (`analysis/`) | 132 tests collected on 2026-09-22 (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
 | **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
 | **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
-| **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. 122 tests. |
+| **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. |
 | **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
+
+**What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
+demonstrate that the pipeline agrees with the generator's model of a stroke, not that it is
+accurate on real strokes. The generator and the pipeline share assumptions that a real stroke
+need not honour: impact always falls at the address swing angle (`theta = 0` at impact by
+construction in `trajectory.generate`); the swing is always about body Y; the impact impulse is
+a symmetric Hanning pulse (`sensor.simulate`); and the pivot and sweet spot both lie on the
+shaft axis (`r = (0, 0, -L)`), where spec §8.4 calls for a full lever-arm vector. An error that
+lives in any of those assumptions cannot show up in these numbers. Accuracy on real strokes is
+what the spec's §10 validation study exists to measure.
 
 ### What the direct-register experiment settled
 
@@ -172,14 +183,16 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-All four came from reading the datasheet or measuring the hardware. Each is recorded in the
-spec with its reasoning.
+Four amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+one new section. The three to §6.4 came from reading the datasheet or measuring the hardware;
+the §11 one is a consequence of the §6.4 rate change that was missed at the time.
 
 | § | Was | Now | Why |
 |---|---|---|---|
 | 6.4 | gyro ±250 dps | **±256 dps** | ±250 does not exist on this part. Its table is powers of two. Converting at 250 while configured at 256 puts a 2.4% scale error into every integrated angle. |
 | 6.4 | 500 Hz stroke, 100 Hz monitor | **896.8 Hz, 112.1 Hz** | Neither exists. ODR steps derive from the gyro's natural frequency. 896.8 chosen over 448.4 because tempo is the binding constraint and its error halved. |
 | 6.4 | "FIFO batching is mandatory" | **direct register polling** | Measured: the FIFO loses 21.9% of samples and cannot count what it loses; direct polling loses none. The original bus-cost argument confused transaction overhead with data volume. |
+| 11 | ≈9 KB per stroke, ~1,400 strokes | **≈16 KB, ~800 strokes** | Storage estimate was still computed at 500 Hz. Recomputed at 896.8 Hz: 1,345 samples × 12 B against the ~13 MB partition, before headers. Amended 2026-09-22. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.

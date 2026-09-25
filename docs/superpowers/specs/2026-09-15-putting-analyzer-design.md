@@ -202,7 +202,9 @@ an alignment stick if they want one.
 ### 4.3 Power budget
 
 Active draw is approximately 70–100 mA (CPU at 240 MHz, backlight on, LVGL rendering, IMU at
-500 Hz). A 400 mAh cell yields roughly 4–5 hours of continuous operation.
+896.8 Hz). A 400 mAh cell yields roughly 4–5 hours of continuous operation. The range was
+estimated when the stroke rate was 500 Hz; what the higher rate adds is not yet measured
+(§6.4, amended).
 
 Because the device sleeps between strokes (§9), realistic practice use is measured in weeks
 rather than hours. The ≥500 strokes-per-charge target in §3 is set against the sleep-enabled
@@ -446,7 +448,7 @@ SLEEP → IDLE → ADDRESS → BACKSWING → DOWNSWING → IMPACT → FOLLOWTHRO
 | FOLLOWTHROUGH | \|ω\| below threshold for 300 ms |
 
 Entering ADDRESS captures two things: the gravity vector `g₀`, and the gyro bias `b` as the
-mean angular rate over the stillness window. Sampling steps to 500 Hz on ADDRESS entry.
+mean angular rate over the stillness window. Sampling steps to 896.8 Hz on ADDRESS entry.
 
 All detection thresholds referenced above are deliberately left unnumbered here. They are
 derived empirically from the logged stroke corpus during Phase 2 and fixed in the Python
@@ -651,8 +653,13 @@ Two constraints that invalidate a session if unplanned:
 
 A LittleFS partition occupies the ~13 MB of flash not used by the application.
 
-One stroke at 500 Hz × 1.5 s × 6 axes × 2 bytes ≈ **9 KB**, giving capacity for roughly
-**1,400 raw strokes** on-device.
+One stroke at 896.8 Hz × 1.5 s × 6 axes × 2 bytes ≈ **16 KB** (1,345 samples × 12 bytes),
+giving capacity for roughly **800 raw strokes** on-device.
+
+*Amended 2026-09-22.* This previously read 500 Hz, ≈9 KB and roughly 1,400 strokes. The
+stroke rate was raised to 896.8 Hz in §6.4 on 2026-09-21 and this estimate was not carried
+along with it. Recomputed at the new rate: 13,000,000 B ÷ 16,142 B ≈ 805 strokes, before
+record headers and filesystem overhead.
 
 Each record carries a header — timestamp, putter profile ID, firmware version, active
 calibration values — followed by raw int16 samples. Raw samples are stored rather than derived

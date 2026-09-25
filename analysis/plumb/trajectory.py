@@ -1,7 +1,8 @@
 """Ground-truth stroke generation.
 
-Produces attitude and body-frame angular velocity at 500 Hz for a stroke whose
-face angle at impact we specify. Offline only; never ported to C.
+Produces attitude and body-frame angular velocity at the stroke ODR
+(SAMPLE_RATE_HZ, below) for a stroke whose face angle at impact we specify.
+Offline only; never ported to C.
 
 Frames and conventions are documented in the implementation plan preamble.
 """
@@ -117,8 +118,8 @@ def generate(p: StrokeParams) -> Trajectory:
     # putter-type dependence invariant 1 prohibits, while actually being a
     # sampling artifact of the generator.
     #
-    # A 500 Hz grid cannot land an arbitrary tempo ratio on a whole sample, so
-    # the achieved ratio is recorded rather than the requested one.
+    # A grid at SAMPLE_RATE_HZ cannot land an arbitrary tempo ratio on a whole
+    # sample, so the achieved ratio is recorded rather than the requested one.
     n_addr = int(round(p.address_duration_s / dt))
     n_back = int(round(p.backswing_duration_s / dt))
     n_down = int(round(p.backswing_duration_s / p.tempo_ratio / dt))
