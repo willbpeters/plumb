@@ -44,13 +44,13 @@ The blocking defect is gone.
 
 | | |
 |---|---|
-| **Synthetic harness** (`analysis/`) | 140 tests collected on 2026-09-25, all passing (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
+| **Synthetic harness** (`analysis/`) | 151 tests collected on 2026-09-25, all passing (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
 | **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
 | **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
-| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
+| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`, `accel_cal.py` (written, not yet run on the board). |
 | **Pivot offset estimation** | `plumb/pivot.py` — velocity form, noise-corrected. Closes the 61% path shortfall; arc now 0.996–1.002 of truth noiselessly for every putter type, and the session mean under 0.28 dps no longer depends on putter type (straight 1.006, arced 1.010 at lie 5). |
 | **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, and across a whole replayed stroke, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source, FMA contraction off on both. |
 | **Single precision, whole stroke** | **4.0×10⁻⁵° of face angle at worst** over ~1,850 accumulated steps, against a 1.0° target. A 30 s address hold does not grow it. Safe for the attitude integrator; see `real.h`. |
@@ -148,23 +148,29 @@ experiment confirmed it. It did.
    it. This is not a reason to raise the threshold (invariant 5), it is a reason the Phase 2
    corpus has to be recorded somewhere representative or it answers the wrong question.
 
-6. **Accelerometer bias inflates the arc, and it is not the pivot.** Found while checking the
-   velocity fit's robustness (the default simulator sets accel bias to zero, so nothing showed
-   it before). Arc / truth at lie 5, strokes 5–12, new fit (old fit):
+6. **Accelerometer bias inflates the arc — mechanism found, fix built, not yet run on hardware.**
+   Oracles on each use of `g0` separately (0.2 m/s² bias, arced, lie 5; no-bias 1.031, biased
+   1.406):
 
-   | accel bias | straight | arced |
-   |---|---|---|
-   | 0 | 1.051 (1.063) | 1.055 (1.196) |
-   | 0.05 m/s² | 1.106 (1.118) | 1.123 (1.252) |
-   | 0.2 m/s² | 1.269 (1.280) | 1.328 (1.418) |
+   - **Ground plane** (true gravity there alone → 1.203). `g0` is gravity *plus* bias, so the
+     plane the path is projected onto tilts by bias/g, and the head's ~3 cm of vertical travel
+     leaks into lateral. Per axis this is **body Y — the swing axis, which the stroke cannot
+     observe** (1.296 → 1.066 with the true plane).
+   - **Pivot fit.** `g0` cancels the bias only at the address orientation, leaving
+     `(I − Rᵀ) b`. Body X, +8%.
+   - **Face angle** moves ~0.004°: immune.
 
-   The pivot barely moves (−0.551 → −0.555 m at 0.05), so the bias reaches the arc another way.
-   **Not** through the ground plane defined by `g0`: removing the known bias from `g0` alone
-   made it worse (2.06), because `g0` also subtracts gravity and its bias was cancelling the
-   accelerometer's. A QMI8658 zero-g offset can be tens of mg, so this may matter more than
-   anything above. Next step: oracle the remaining accel paths one at a time, and measure the
-   real offset (a six-position tumble on the calibration jig would do it). Gyro scale +1% and
-   accel scale +1% cost 2% and 0.4% of arc respectively.
+   Linear and symmetric at small bias: **1.21% of arc per 0.01 m/s² on Y at lie 5**, 0.42% on X,
+   about a quarter of that at lie 20. This board read 9.689 m/s² against 9.81 at rest in
+   bring-up, so its error is in the range that matters. **Requirement: residual offset under
+   ~0.02 m/s² (2 mg)** to keep this under 2.5% of arc at lie 5.
+
+   Not fixable per stroke; the fix is spec §8.1's device calibration, which was specified and
+   never implemented. `plumb/calibration.py` solves offset and gain per axis from resting poses
+   and the pipeline applies it; a simulated tumble of a biased board restores the arc exactly
+   (1.347 → 1.055, the unbiased value). `tools/accel_cal.py` runs it on the board. **Open:** it
+   has not been run, cross-axis misalignment and the offset's temperature drift are not
+   modelled, and the firmware will need the result in NVS and in each record's header (§11).
 
 **Resolved on 2026-09-21:** the FIFO sample loss (routed around), the corrupted FIFO reads
 (quantified, and no longer in the signal path), the intermittent init (soft reset + the
@@ -236,8 +242,8 @@ unit's calibration into a shared constant trades a known error for a hidden one.
 options: per-unit calibration, or firmware that measures its own rate at startup — which it can
 now do in about ten lines, since the counter exists and works.
 
-**Also open, offline:** accelerometer bias inflating the arc (open defect 6). No hardware
-needed to find the mechanism; hardware needed to know how big the real offset is.
+**Also ready to run:** the accelerometer tumble (open defect 6), which needs a hand and about
+five minutes — see "Blocked on Will".
 
 **Port note for `pivot.c`:** the centring is done from running sums, which cancels. Fine in
 double; in single precision the weakest eigenvalue (~0.07 against sums of ~300) keeps about four
@@ -324,6 +330,12 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
 ---
 
 ## Blocked on Will
+
+- **Run the accelerometer tumble.** `cd analysis; uv run python -m tools.accel_cal --port COM4
+  --gravity 9.800` — six faces, then two poses of any kind, board still each time. It prints
+  offset and gain and saves the raw pose means under `data/calibration/`. This says whether
+  open defect 6 is a 2% problem or a 25% one on this unit. (9.800 is for Sacramento; pass local
+  g if elsewhere.)
 
 - **Print a base.** The tap test (§5.5) is still the highest-risk unknown in the project and it
   has not started. If the mount resonates below ~200 Hz, §5.5's escalation runs *before* any
