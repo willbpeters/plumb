@@ -53,8 +53,10 @@ void pl_ui_dot(lv_layer_t *layer, lv_color_t color, float cx, float cy,
 void pl_ui_arc(lv_layer_t *layer, lv_color_t color, int32_t radius,
                int32_t width, int32_t start_deg, int32_t end_deg, bool rounded);
 
-/* The faint arrow and TARGET at the left edge: left is the target. */
-void pl_ui_target_mark(lv_layer_t *layer);
+/* The faint arrow at the left edge, and optionally the word TARGET: left is
+ * the target. The path screen omits the word, because its target line and
+ * trail run through where the word sits. */
+void pl_ui_target_mark(lv_layer_t *layer, bool with_word);
 /* What a metric without a reading shows: a faint dash pair and its title. */
 void pl_ui_no_reading(lv_layer_t *layer, const char *title);
 

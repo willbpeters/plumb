@@ -42,7 +42,7 @@ static void draw(lv_layer_t *layer, const pl_ui_result *result, uint32_t t_ms)
      * hero number, whose glyphs start about y=150, drew over it. */
     pl_ui_text(layer, &pl_font_marker, PL_UI_FAINT, LV_OPA_COVER, "HEEL",
                150, 147, PL_UI_ALIGN_LEFT, 2);
-    pl_ui_target_mark(layer);
+    pl_ui_target_mark(layer, true);
 
     draw_head(layer, pl_ui_ease_out((float)t_ms / (float)SWING_MS)
                          * pl_ui_face_rotation_cw_deg(result->face_angle_deg));

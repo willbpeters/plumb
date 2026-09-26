@@ -213,3 +213,38 @@ def test_the_backswing_draws_before_the_through_stroke():
     mid_thru = uisnap.render(Result(), screen=1, t_ms=700 + 170)
     assert bar(mid_thru, BACK_ROW)[0] == pytest.approx(118 * 0.70, abs=2)
     assert bar(mid_thru, THRU_ROW)[0] == pytest.approx(118 * 0.17, abs=6)
+
+
+# -- path -----------------------------------------------------------------------
+
+def trail(rgb):
+    ys, xs = np.nonzero(near(rgb, ACCENT) & (ROWS < 200))
+    return xs, ys
+
+
+def test_out_to_in_starts_outside_and_finishes_inside():
+    """Outside is up (away from the golfer). The stroke runs right to left.
+    Sign and non-flatness only: the magnitude is pinned by
+    test_path_ends_are_the_arc_amplified_and_scaled_by_travel."""
+    xs, ys = trail(uisnap.render(Result(path_dir=OUT_TO_IN), screen=2))
+    start, finish = ys[xs > 180].mean(), ys[xs < 60].mean()
+    assert start < 122 < finish
+    assert finish - start > 12, "the ends are about 2 x 12.16 px apart vertically"
+
+
+def test_in_to_out_is_the_mirror():
+    xs, ys = trail(uisnap.render(Result(path_dir=IN_TO_OUT), screen=2))
+    assert ys[xs > 180].mean() > 122 > ys[xs < 60].mean()
+
+
+def test_a_straight_path_is_flat():
+    _, ys = trail(uisnap.render(Result(path_dir=STRAIGHT), screen=2))
+    assert np.abs(ys - 122).max() <= 4
+
+
+def test_the_head_travels_right_to_left():
+    def dot_x(t):
+        rgb = uisnap.render(Result(), screen=2, t_ms=t)
+        _, xs = np.nonzero(near(rgb, FG) & (ROWS > 40) & (ROWS < 190))
+        return xs.mean()
+    assert dot_x(300) > dot_x(800)

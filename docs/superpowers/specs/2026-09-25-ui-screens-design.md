@@ -127,7 +127,8 @@ with the label `BACK : THROUGH`, and there is no "ideal" marker.
 ### 4.3 Path
 
 Dashed target line, `OUTSIDE` above, `INSIDE · YOU` below, and a head that retraces the
-stroke right to left along a quadratic curve. The text reads `OUT TO IN`, `IN TO OUT` or
+stroke right to left along a straight segment (the studies wrote a quadratic, but its control
+point was the chord midpoint, which is a straight line). The text reads `OUT TO IN`, `IN TO OUT` or
 `STRAIGHT`, and **no arc figure is ever shown**.
 
 - The curve spans a fixed 152 px horizontally, standing for `path_travel_m`.

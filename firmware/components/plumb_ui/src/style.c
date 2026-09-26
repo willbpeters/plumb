@@ -177,11 +177,13 @@ void pl_ui_arc(lv_layer_t *layer, lv_color_t color, int32_t radius,
     lv_draw_arc(layer, &dsc);
 }
 
-void pl_ui_target_mark(lv_layer_t *layer)
+void pl_ui_target_mark(lv_layer_t *layer, bool with_word)
 {
     pl_ui_triangle(layer, PL_UI_FAINT, 14.0f, 120.0f, 24.0f, 114.0f, 24.0f, 126.0f);
-    pl_ui_text(layer, &pl_font_marker, PL_UI_FAINT, LV_OPA_COVER, "TARGET",
-               30, 124, PL_UI_ALIGN_LEFT, 2);
+    if (with_word) {
+        pl_ui_text(layer, &pl_font_marker, PL_UI_FAINT, LV_OPA_COVER, "TARGET",
+                   30, 124, PL_UI_ALIGN_LEFT, 2);
+    }
 }
 
 void pl_ui_no_reading(lv_layer_t *layer, const char *title)
