@@ -21,3 +21,19 @@ Glyphs: space, `. / 0-9 :`, `A-Z`, `°`, `·`, `—`. Nothing else, on purpose:
 for a glyph that is not here.
 
 On the device the font data belongs in PSRAM (invariant 7).
+
+## Measured size
+
+2026-09-26, MSVC x64. Object sizes include relocation and symbol data, so
+they are an upper bound on the flash cost; bitmap bytes are the glyph data
+itself, counted from the generated arrays.
+
+| Symbol | Object | Glyph bitmaps |
+|---|---|---|
+| `pl_font_hero` | 24,443 B | 15,098 B |
+| `pl_font_word` | 7,131 B | 3,745 B |
+| `pl_font_label` | 2,956 B | 697 B |
+| `pl_font_marker` | 2,721 B | 534 B |
+| **total** | **37,251 B** | **20,074 B** |
+
+About 1.8% of the 2 MB PSRAM at the upper bound.

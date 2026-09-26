@@ -11,6 +11,19 @@ uv run pytest                   # the algorithm's test suite
 uv run python -m plumb.sweep    # the full parameter sweep (~8 min)
 ```
 
+## The UI bench
+
+The result screens (`firmware/components/plumb_ui/`) render on the PC with no board, through
+`firmware/test/uisnap.c` and `tools/uisnap.py`:
+
+```bash
+uv run pytest tests/test_ui.py      # pixel-measured checks against the inputs
+uv run python -m tools.uisnap       # PNGs of every screen -> firmware/test/ui-gallery/
+```
+
+Needs the LVGL submodule (`git submodule update --init`). The first run compiles LVGL once;
+later runs reuse `firmware/test/obj-lvgl/`.
+
 ## What this proves, and what it does not
 
 The pipeline recovers a face angle **we specified ourselves**, from simulated QMI8658 counts.

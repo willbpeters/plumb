@@ -280,3 +280,35 @@ def test_the_ring_fills_over_time():
     early = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3, t_ms=150)))
     final = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3)))
     assert 0 < early < final
+
+
+# -- every string, every screen ---------------------------------------------------
+
+SWEEP = [
+    Result(),
+    Result(face=-0.03, backswing_s=1.4, downswing_s=0.6, path_dir=IN_TO_OUT, speed=3.4),
+    Result(face=12.35, path_dir=STRAIGHT, speed=0.0),
+    Result(face=None, backswing_s=None, path_dir=None, speed=None),
+]
+
+
+def test_every_string_on_every_screen_has_its_glyphs(tmp_path):
+    """A glyph the font lacks renders as nothing at all. Render every screen
+    for results that exercise every label and number format, at mid-motion and
+    at rest, then ask the UI how many glyphs it could not find."""
+    frame = tmp_path / "frame.rgb565"
+    lines = ["idle", "advance 10", f"snap {frame}"]
+    for result in SWEEP:
+        lines.append(result.command())
+        for _ in range(4):
+            lines += ["advance 400", f"snap {frame}", "advance 6000",
+                      f"snap {frame}", "next"]
+    lines.append("missing")
+    assert uisnap.run(lines) == ["0"]
+
+
+def test_the_gallery_writes_a_png_per_case(tmp_path):
+    written = uisnap.gallery(tmp_path)
+    assert len(written) == 10
+    for path in written:
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

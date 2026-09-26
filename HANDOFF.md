@@ -54,6 +54,7 @@ The blocking defect is gone.
 | **Pivot offset estimation** | `plumb/pivot.py` — velocity form, noise-corrected. Closes the 61% path shortfall; arc now 0.996–1.002 of truth noiselessly for every putter type, and the session mean under 0.28 dps no longer depends on putter type (straight 1.006, arced 1.010 at lie 5). |
 | **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, and across a whole replayed stroke, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source, FMA contraction off on both. |
 | **Single precision, whole stroke** | **4.0×10⁻⁵° of face angle at worst** over ~1,850 accumulated steps, against a 1.0° target. A 30 s address hold does not grow it. Safe for the attitude integrator; see `real.h`. |
+| **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. **Not yet on the board**: the display has never been brought up. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 **What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
@@ -203,9 +204,18 @@ compares against ground truth.
 
 ---
 
-## ▸ Next task — pick one of three
+## ▸ Next task — pick one
 
 Nothing is blocked on code any more. In order of what unblocks the most:
+
+**0. Bring the display up and put the screens on it.** The screens are proven on the host. What
+remains is the GC9A01 driver, LVGL's tick and flush on the device, touch-to-swipe
+(`pl_ui_next`/`pl_ui_prev`), fonts in PSRAM and draw buffers in internal SRAM (invariant 7), and
+the app task that stops calling `lv_timer_handler()` between arm and follow-through
+(invariant 8). Two things the host bench taught that the device build must carry: use
+`LV_COLOR_FORMAT_DEFAULT`, not `LV_COLOR_DEPTH` (9.6 deprecates it and its `#warning` is fatal
+under MSVC), and LVGL 9.6 has two sources named `vg_lite_matrix.c`, so any build that puts all
+objects in one directory silently links one of them.
 
 **1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
 the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
