@@ -248,3 +248,35 @@ def test_the_head_travels_right_to_left():
         _, xs = np.nonzero(near(rgb, FG) & (ROWS > 40) & (ROWS < 190))
         return xs.mean()
     assert dot_x(300) > dot_x(800)
+
+
+# -- impact speed -----------------------------------------------------------------
+
+def ring_angles(rgb):
+    """Angles of the amber ring pixels, degrees, counter-clockwise from three
+    o'clock (maths convention, y up)."""
+    ys, xs = np.nonzero(near(rgb, ACCENT))
+    r = np.hypot(xs - 119.5, ys - 119.5)
+    keep = (r > 78) & (r < 96)
+    return np.degrees(np.arctan2(-(ys[keep] - 119.5), xs[keep] - 119.5))
+
+
+def test_the_ring_fills_anticlockwise_from_three_oclock():
+    """0.75 m/s is a quarter of the 3.0 m/s full scale: 67.5 of 270 deg."""
+    a = ring_angles(uisnap.render(Result(speed=0.75), screen=3))
+    assert len(a) > 50
+    assert a.min() > -6 and a.max() < 74
+
+
+def test_above_full_scale_the_ring_is_full_and_stops():
+    """270 deg from three o'clock ends at six o'clock: the lower-right quarter
+    stays empty, whatever the speed."""
+    a = ring_angles(uisnap.render(Result(speed=4.0), screen=3))
+    assert not np.any((a > -84) & (a < -6))
+    assert np.any(np.abs(a) > 170), "it reaches nine o'clock"
+
+
+def test_the_ring_fills_over_time():
+    early = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3, t_ms=150)))
+    final = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3)))
+    assert 0 < early < final
