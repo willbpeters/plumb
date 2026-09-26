@@ -137,3 +137,35 @@ def test_a_metric_without_a_reading_draws_no_graphic(screen):
     empty = Result(face=None, backswing_s=None, path_dir=None, speed=None)
     rgb = uisnap.render(empty, screen=screen)
     assert not (near(rgb, ACCENT) & (ROWS < 220)).any()
+
+
+# -- face angle -----------------------------------------------------------------
+
+def face_edge_angle(rgb):
+    """The drawn face edge's rotation from vertical, degrees, clockwise on
+    screen, measured from the amber pixels by their principal axis."""
+    ys, xs = np.nonzero(near(rgb, ACCENT) & (ROWS < 170))
+    points = np.column_stack([xs, ys]).astype(float)
+    points -= points.mean(axis=0)
+    _, vectors = np.linalg.eigh(points.T @ points)
+    dx, dy = vectors[:, -1]
+    if dy < 0:
+        dx, dy = -dx, -dy
+    # A vertical edge (0, 1) rotated clockwise by t becomes (-sin t, cos t).
+    return float(np.degrees(np.arctan2(-dx, dy))), len(xs)
+
+
+@pytest.mark.parametrize("face, drawn", [(1.8, -9.0), (-1.8, 9.0), (12.0, -45.0)])
+def test_the_face_edge_is_drawn_at_five_times_the_angle(face, drawn):
+    """Measured from pixels: open turns counter-clockwise, closed clockwise,
+    and a large reading stops at the clamp."""
+    angle, count = face_edge_angle(uisnap.render(Result(face=face), screen=0))
+    assert count > 200
+    assert angle == pytest.approx(drawn, abs=1.0)
+
+
+def test_the_head_swings_from_square():
+    start, _ = face_edge_angle(uisnap.render(Result(face=1.8), screen=0, t_ms=0))
+    early, _ = face_edge_angle(uisnap.render(Result(face=1.8), screen=0, t_ms=100))
+    assert start == pytest.approx(0.0, abs=1.0)
+    assert -4.5 < early < -1.0, "part way toward open, ease-out"
