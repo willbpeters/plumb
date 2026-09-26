@@ -169,3 +169,47 @@ def test_the_head_swings_from_square():
     early, _ = face_edge_angle(uisnap.render(Result(face=1.8), screen=0, t_ms=100))
     assert start == pytest.approx(0.0, abs=1.0)
     assert -4.5 < early < -1.0, "part way toward open, ease-out"
+
+
+# -- tempo ----------------------------------------------------------------------
+
+BACK_ROW, THRU_ROW = 80, 118
+CAP = 15   # a round cap adds width/2 at each end of a 15 px bar
+
+
+def bar(rgb, row):
+    """(drawn length, centre x) of the amber bar on a row, or None."""
+    cols = np.nonzero(near(rgb[row], ACCENT))[0]
+    if len(cols) == 0:
+        return None
+    return cols.max() - cols.min() + 1 - CAP, (cols.max() + cols.min()) / 2
+
+
+def test_bar_lengths_are_the_durations_at_one_scale():
+    rgb = uisnap.render(Result(backswing_s=0.70, downswing_s=0.35), screen=1)
+    (back, _), (thru, _) = bar(rgb, BACK_ROW), bar(rgb, THRU_ROW)
+    assert back == pytest.approx(118 * 0.70, abs=2)
+    assert thru == pytest.approx(118 * 0.35, abs=2)
+    assert back / thru == pytest.approx(2.0, rel=0.06)
+
+
+def test_the_backswing_goes_away_from_the_target():
+    rgb = uisnap.render(Result(), screen=1)
+    assert bar(rgb, BACK_ROW)[1] > 120, "backswing grows right, away from the hole"
+    assert bar(rgb, THRU_ROW)[1] < 120, "through-stroke grows left, toward it"
+
+
+def test_a_long_backswing_shrinks_both_bars_together():
+    rgb = uisnap.render(Result(backswing_s=1.0, downswing_s=0.5), screen=1)
+    assert bar(rgb, BACK_ROW)[0] == pytest.approx(90, abs=2)
+    assert bar(rgb, THRU_ROW)[0] == pytest.approx(45, abs=2)
+
+
+def test_the_backswing_draws_before_the_through_stroke():
+    """Real time: 0.70 s out, then 0.34 s back. The clock resolves 10 ms."""
+    mid_back = uisnap.render(Result(), screen=1, t_ms=350)
+    assert bar(mid_back, BACK_ROW)[0] == pytest.approx(118 * 0.35, abs=6)
+    assert bar(mid_back, THRU_ROW) is None
+    mid_thru = uisnap.render(Result(), screen=1, t_ms=700 + 170)
+    assert bar(mid_thru, BACK_ROW)[0] == pytest.approx(118 * 0.70, abs=2)
+    assert bar(mid_thru, THRU_ROW)[0] == pytest.approx(118 * 0.17, abs=6)
