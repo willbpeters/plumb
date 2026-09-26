@@ -12,3 +12,9 @@ __pycache__/
 firmware/test/*.exe
 firmware/test/obj/
 firmware/test/*.obj
+
+# built by analysis/tools/cbuild.py build_ui()
+firmware/test/obj-lvgl/
+firmware/test/obj-ui/
+firmware/test/ui-gallery/
+firmware/test/*.rgb565
