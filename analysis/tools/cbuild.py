@@ -24,6 +24,8 @@ COMPONENT = REPO / "firmware" / "components" / "plumb"
 HARNESS = REPO / "firmware" / "test"
 
 SOURCES = [HARNESS / "portcheck.c", COMPONENT / "src" / "quat.c"]
+LVGL = REPO / "firmware" / "third_party" / "lvgl"
+UI = REPO / "firmware" / "components" / "plumb_ui"
 
 MSVC_ROOT = Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community"
                  r"\VC\Tools\MSVC")
@@ -144,6 +146,152 @@ def build(name: str, *defines: str) -> BuildResult:
         raise RuntimeError(
             f"compiling the port failed ({label}):\n"
             f"{result.stdout}\n{result.stderr}")
+    return BuildResult(executable=output, compiler=label)
+
+
+def _unix_objects(cc: str, flags: list[str], sources: list[Path],
+                  directory: Path) -> list[Path]:
+    """Compile each source to an object, in parallel. cc has no -MP."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(source: Path):
+        obj = directory / f"{source.stem}.o"
+        result = subprocess.run([cc, *flags, "-c", str(source), "-o", str(obj)],
+                                capture_output=True, text=True)
+        return source, result
+
+    with ThreadPoolExecutor() as pool:
+        for source, result in pool.map(one, sources):
+            if result.returncode != 0:
+                raise RuntimeError(f"compiling {source} failed:\n"
+                                   f"{result.stdout}\n{result.stderr}")
+    return [directory / f"{s.stem}.o" for s in sources]
+
+
+def _by_unique_name(sources: list[Path]) -> list[list[Path]]:
+    """Split sources so no group holds two files with the same name.
+
+    A compiler names each object after its source's file name, so two
+    same-named sources compiled into one directory overwrite each other and
+    the build links whichever finished last, silently. LVGL 9.6 has two
+    vg_lite_matrix.c. Each group is compiled into its own directory.
+    """
+    groups: list[list[Path]] = []
+    for source in sources:
+        for group in groups:
+            if all(other.stem != source.stem for other in group):
+                group.append(source)
+                break
+        else:
+            groups.append([source])
+    return groups
+
+
+def build_ui(name: str = "uisnap.exe") -> BuildResult:
+    """Build the headless UI renderer: LVGL, the plumb_ui component, uisnap.c.
+
+    LVGL is compiled once into firmware/test/obj-lvgl and reused until its
+    sources, its version or lv_conf.h change. It is third-party code built
+    with relaxed warnings; our code is held to -W4 -WX (or -Wall -Wextra
+    -Werror), with LVGL's headers marked external so their warnings cannot
+    fail our build.
+    """
+    if not (LVGL / "src").is_dir():
+        raise RuntimeError("LVGL is missing: run `git submodule update --init` "
+                           "in the repository root")
+    lvgl_sources = sorted((LVGL / "src").rglob("*.c"))
+    fonts = sorted((UI / "fonts").glob("pl_font_*.c"))
+    ours = sorted((UI / "src").glob("*.c")) + [HARNESS / "uisnap.c"]
+
+    output = HARNESS / name
+    lib_dir = HARNESS / "obj-lvgl"
+    our_dir = HARNESS / "obj-ui"
+    our_dir.mkdir(parents=True, exist_ok=True)
+    groups = _by_unique_name(lvgl_sources)
+    group_dirs = [lib_dir / str(i) for i in range(len(groups))]
+    for directory in group_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    stamp = "\n".join([(UI / "lv_conf.h").read_text(),
+                       (LVGL / "lv_version.h").read_text(),
+                       describe_toolchain(),
+                       *(str(s.relative_to(LVGL)) for s in lvgl_sources)])
+    stamp_file = lib_dir / "stamp.txt"
+    fresh = stamp_file.is_file() and stamp_file.read_text() == stamp
+    common = ["-DLV_CONF_INCLUDE_SIMPLE"]
+
+    unix = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if unix:
+        lib_flags = ["-std=c99", "-O2", "-w", *common, f"-I{UI}", f"-I{LVGL}"]
+        if not fresh:
+            for group, directory in zip(groups, group_dirs):
+                _unix_objects(unix, lib_flags, group, directory)
+            stamp_file.write_text(stamp)
+        lib = [d / f"{s.stem}.o" for g, d in zip(groups, group_dirs) for s in g]
+        font_objs = _unix_objects(unix, lib_flags, fonts, our_dir)
+        command = [unix, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                   *common, f"-I{UI / 'include'}", f"-I{UI / 'src'}",
+                   f"-I{UI}", "-isystem", str(LVGL),
+                   *(str(s) for s in ours), *(str(o) for o in font_objs + lib),
+                   "-lm", "-o", str(output)]
+        environment = None
+        label = f"unix:{Path(unix).name}"
+    else:
+        msvc = _msvc()
+        if msvc is None:
+            raise CompilerNotFound(
+                "no host C compiler found (looked for cc, gcc, clang, then "
+                "MSVC under Program Files)")
+        cl, include, lib_paths = msvc
+        environment = dict(os.environ)
+        environment["INCLUDE"] = os.pathsep.join(str(p) for p in include)
+        environment["LIB"] = os.pathsep.join(str(p) for p in lib_paths)
+
+        def cl_objects(flags: list[str], sources: list[Path],
+                       directory: Path) -> list[Path]:
+            if not sources:
+                return []
+            rsp = directory / "sources.rsp"
+            rsp.write_text("\n".join(f'"{s}"' for s in sources))
+            result = subprocess.run(
+                [str(cl), "-nologo", "-TC", "-c", "-MP", *flags, f"@{rsp}",
+                 f"-Fo:{directory}{os.sep}"],
+                capture_output=True, text=True, errors="replace",
+                env=environment, cwd=str(HARNESS))
+            if result.returncode != 0:
+                raise RuntimeError(f"compiling into {directory.name} failed:\n"
+                                   f"{result.stdout}\n{result.stderr}")
+            return [directory / f"{s.stem}.obj" for s in sources]
+
+        lib_flags = ["-O2", "-W1", *common, f"-I{UI}", f"-I{LVGL}"]
+        if not fresh:
+            for group, directory in zip(groups, group_dirs):
+                cl_objects(lib_flags, group, directory)
+            stamp_file.write_text(stamp)
+        lib = [d / f"{s.stem}.obj" for g, d in zip(groups, group_dirs) for s in g]
+        font_objs = cl_objects(lib_flags, fonts, our_dir)
+        link = our_dir / "link.rsp"
+        link.write_text("\n".join(f'"{p}"' for p in [*ours, *font_objs, *lib]))
+        # No -TC here, unlike every other cl call in this file: -TC means
+        # "treat EVERY input as C", and this command also takes the 480 LVGL
+        # objects to link. With it, cl compiled binary .obj files as C source:
+        # 11,591 errors and ten minutes of CPU before anyone noticed. The .c
+        # extension is enough to make our sources C.
+        command = [str(cl), "-nologo", "-O2", "-W4", "-WX",
+                   "-D_CRT_SECURE_NO_WARNINGS", *common,
+                   f"-I{UI / 'include'}", f"-I{UI / 'src'}", f"-I{UI}",
+                   f"-external:I{LVGL}", "-external:W0",
+                   f"@{link}", f"-Fe:{output}", f"-Fo:{our_dir}{os.sep}"]
+        label = "msvc"
+
+    # Compiler output is in the console code page and can hold anything; a
+    # failure has to be readable rather than crash the reader thread.
+    result = subprocess.run(command, capture_output=True, text=True,
+                            errors="replace", env=environment,
+                            cwd=str(HARNESS))
+    if result.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"building the UI bench failed ({label}):\n"
+                           f"{result.stdout}\n{result.stderr}")
     return BuildResult(executable=output, compiler=label)
 
 
