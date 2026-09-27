@@ -24,6 +24,10 @@ COMPONENT = REPO / "firmware" / "components" / "plumb"
 HARNESS = REPO / "firmware" / "test"
 
 SOURCES = [HARNESS / "portcheck.c", COMPONENT / "src" / "quat.c"]
+ACQ = REPO / "firmware" / "components" / "acq"
+ACQ_SOURCES = [HARNESS / "acqcheck.c",
+               *(ACQ / "src" / f"{name}.c"
+                 for name in ("ring", "seqcount", "jitter", "frame"))]
 LVGL = REPO / "firmware" / "third_party" / "lvgl"
 UI = REPO / "firmware" / "components" / "plumb_ui"
 
@@ -87,12 +91,16 @@ def describe_toolchain() -> str:
     return "none"
 
 
-def build(name: str, *defines: str) -> BuildResult:
-    """Compile the harness to `name` under firmware/test. Raises if it cannot.
+def build(name: str, *defines: str, sources: list[Path] | None = None,
+          includes: list[Path] | None = None) -> BuildResult:
+    """Compile a host harness to `name` under firmware/test. Raises if it cannot.
 
     `defines` are passed through in the compiler's own spelling, e.g.
-    "PLUMB_SINGLE_PRECISION".
+    "PLUMB_SINGLE_PRECISION". `sources` and `includes` default to the
+    quaternion port's differential harness.
     """
+    sources = SOURCES if sources is None else sources
+    includes = [COMPONENT / "include"] if includes is None else includes
     HARNESS.mkdir(parents=True, exist_ok=True)
     output = HARNESS / name
 
@@ -107,9 +115,9 @@ def build(name: str, *defines: str) -> BuildResult:
                    # MADD.S and GCC contracts by default, so the host build
                    # states the same rule the component's CMakeLists does.
                    "-ffp-contract=off",
-                   f"-I{COMPONENT / 'include'}",
+                   *(f"-I{p}" for p in includes),
                    *(f"-D{d}" for d in defines),
-                   *(str(s) for s in SOURCES), "-lm", "-o", str(output)]
+                   *(str(s) for s in sources), "-lm", "-o", str(output)]
         environment = None
         label = f"unix:{Path(unix).name}"
     else:
@@ -131,9 +139,9 @@ def build(name: str, *defines: str) -> BuildResult:
                    # harness only: the ported algorithm compiles clean at
                    # -W4 -WX, which is the property worth keeping true.
                    "-D_CRT_SECURE_NO_WARNINGS",
-                   f"-I{COMPONENT / 'include'}",
+                   *(f"-I{p}" for p in includes),
                    *(f"-D{d}" for d in defines),
-                   *(str(s) for s in SOURCES),
+                   *(str(s) for s in sources),
                    f"-Fe:{output}", f"-Fo:{objects}{os.sep}"]
         environment = dict(os.environ)
         environment["INCLUDE"] = os.pathsep.join(str(p) for p in include)
@@ -148,6 +156,11 @@ def build(name: str, *defines: str) -> BuildResult:
             f"{result.stdout}\n{result.stderr}")
     return BuildResult(executable=output, compiler=label)
 
+
+
+def build_acqcheck(name: str = "acqcheck.exe") -> BuildResult:
+    """The acquisition core's pure-C modules, for tests/test_acq.py."""
+    return build(name, sources=ACQ_SOURCES, includes=[ACQ / "include"])
 
 def _unix_objects(cc: str, flags: list[str], sources: list[Path],
                   directory: Path) -> list[Path]:
