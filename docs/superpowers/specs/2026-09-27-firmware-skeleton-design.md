@@ -136,6 +136,6 @@ Recorded in the plan (`docs/superpowers/plans/2026-09-27-firmware-skeleton.md`);
 2. **Jitter:** recorded, animating against armed (the tables in `bringup-results.md`). Rendering
    pushes read latency past the sample period and, together with streaming, lost 0.72%; the gate
    removes both. — met.
-3. **Screens and swipes:** not yet checked by eye on this firmware. — **open, needs Will.**
+3. **Screens and swipes:** checked by Will at the board, 2026-09-27: screens right, swipes work. — met.
 4. **No radio code linked:** checked on every link, and the check shown to fail a canary. — met.
 5. **Parent §6.2 amended** for data-ready pacing. — met.

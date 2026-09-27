@@ -57,7 +57,7 @@ The blocking defect is gone.
 | **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. |
 | **Display and touch, on the board** | `firmware/bringup-arduino/display` — the same screens on the GC9A01 panel, swipe with the touch controller, verified by Will at the board 2026-09-26. `MADCTL` 0x48, inversion on, SPI 80 MHz, full-screen refresh 15.8–20.7 ms per screen. Build and flash with `uv run python -m tools.board_ui flash --port COM4`. Pins and measurements in `docs/bringup-results.md`. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
-| **ESP-IDF firmware skeleton** (2026-09-27) | `firmware/` on ESP-IDF v5.5.5, now what the board runs. IMU read on core 0, woken by its own DRDY line (INT2 → GPIO3) in SyncSample mode; UI on core 1; the invariant-8 gate as an atomic flag (`a`/`o` on the console for now). **0 of 54,653 samples lost in 60 s at rest**, through `capture.py` unchanged. **Rendering pushes read latency past the 1103 µs period, and with streaming lost 0.72%; with the gate armed, 0 lost and latency max 820 µs.** No radio code linked, checked on every build. The IMU comes up on 60 of 60 resets. Build: `firmware/idf.ps1 build`, flash: `firmware/idf.ps1 -p COM4 flash`. Everything in `docs/bringup-results.md`, last section. |
+| **ESP-IDF firmware skeleton** (2026-09-27) | `firmware/` on ESP-IDF v5.5.5, now what the board runs. IMU read on core 0, woken by its own DRDY line (INT2 → GPIO3) in SyncSample mode; UI on core 1; the invariant-8 gate as an atomic flag (`a`/`o` on the console for now). **0 of 54,653 samples lost in 60 s at rest**, through `capture.py` unchanged. **Rendering pushes read latency past the 1103 µs period, and with streaming lost 0.72%; with the gate armed, 0 lost and latency max 820 µs.** No radio code linked, checked on every build. The IMU comes up on 60 of 60 resets. Screens and swipes checked by Will. Build: `firmware/idf.ps1 build`, flash: `firmware/idf.ps1 -p COM4 flash`. Everything in `docs/bringup-results.md`, last section. |
 
 **What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
 demonstrate that the pipeline agrees with the generator's model of a stroke, not that it is
@@ -213,8 +213,6 @@ Nothing is blocked on code any more. In order of what unblocks the most:
 **0. What the firmware skeleton leaves (2026-09-27).** `firmware/` is the product build now.
 Still to do on it, in order:
 
-- **Will checks the screens and swipes on the new firmware** (skeleton done-means 3): send `r`,
-  then swipe. It is the only done-means not yet met.
 - **Find where rendering's delay comes from** before anything writes flash during a stroke.
   Acquisition is on core 0 and still slowed by rendering on core 1; the two suspects are the
   cache the cores share and the UART interrupt, which was installed from core 0. Measure with the
@@ -373,7 +371,6 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
   Fit at least 1000 mAh, or change R15; confirm the board is Rev3 from its silkscreen first.
   Spec §4.4 amended 2026-09-26; details in `docs/bringup-results.md`.
 - **The 906.86 Hz decision.** See next task 2.
-- **Look at the screens on the new firmware** and swipe; see next task 0.
 
 **Resolved:** the blade putter's grip has an **open butt cap**, so the §5.1 barbed-taper base
 works as specified. No step-drilling needed.

@@ -739,7 +739,7 @@ Produced by `firmware/` (ESP-IDF v5.5.5; design:
 
 **Status: acquisition on core 0 is paced by the IMU's DRDY line and loses nothing at rest; the
 UI runs on core 1; the invariant-8 gate is measured to remove the loss and the timing tail that
-rendering causes.** The screens and swipes on this firmware are not yet checked by eye.
+rendering causes.** Screens and swipes checked by Will at the board: right, and working.
 
 ### Loss — measured, from the sensor's own sample counter
 
@@ -839,8 +839,6 @@ yet done).
 
 ### Not yet checked
 
-- **Screens and swipes on this firmware, by eye.** Touch answers (chip ID 0xB5), and `r`, `n`,
-  `p` and gestures drive `pl_ui`, but nobody has looked at the panel since the flash.
 - The 120 MHz flash of parent §6.3 (not attempted: it needs `SPI_FLASH_HPM_ON` and a flash part
   that supports it) and `LV_MEMCPY_MEMSET_STD` (an LVGL 8 name; its LVGL 9 equivalent lives in
   the shared `lv_conf.h`).
