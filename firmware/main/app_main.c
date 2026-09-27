@@ -17,6 +17,7 @@
 
 #include "acq/acq.h"
 #include "board/i2c_bus.h"
+#include "board/qmi8658.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -35,7 +36,10 @@ static esp_err_t s_ui_result = ESP_FAIL;
 static void status(void)
 {
     stream_status();
-    uart_io_printf("# imu %s, ui %s\n", esp_err_to_name(s_imu_result),
+    uart_io_printf("# imu %s (init step %d, ctrl9 %ld us, SDA at boot %d, clear clocks %d, SDA after clear %d), ui %s\n",
+                   esp_err_to_name(s_imu_result), qmi8658_init_step(),
+                   (long)qmi8658_ctrl9_us(), board_i2c_sda_at_boot(),
+                   board_i2c_clear_clocks(), board_i2c_sda_after_clear(),
                    esp_err_to_name(s_ui_result));
     if (s_ui_result == ESP_OK) {
         ui_port_status();

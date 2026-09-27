@@ -3,4 +3,4 @@
 idf_component_register(
     SRCS "src/i2c_bus.c" "src/qmi8658.c" "src/cst816.c" "src/gc9a01.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_driver_i2c esp_driver_gpio esp_driver_spi esp_lcd)
+    REQUIRES esp_driver_i2c esp_driver_gpio esp_driver_spi esp_lcd esp_timer)

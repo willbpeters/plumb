@@ -6,6 +6,7 @@
 
 #include "board/pins.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -18,6 +19,7 @@
 #define REG_CTRL3 0x04
 #define REG_CTRL5 0x06
 #define REG_CTRL7 0x08
+#define REG_CTRL8 0x09
 #define REG_CTRL9 0x0A
 #define REG_CAL1_L 0x0B
 #define REG_FIFO_CTRL 0x14
@@ -43,7 +45,11 @@
 #define CTRL9_CMD_ACK 0x00
 #define CTRL9_CMD_AHB_CLOCK_GATING 0x12
 #define STATUSINT_CMD_DONE 0x80
-#define CTRL9_POLLS 50
+/* Table 22: with CTRL8.bit7 = 0 (reset) the CTRL9 handshake is the INT1 pin;
+ * with 1 it is STATUSINT.bit7, which is what ctrl9() polls. 5.10.1 says
+ * bit 7 is set either way; 30% of boots here said otherwise. */
+#define CTRL8_HANDSHAKE_STATUSINT 0x80
+#define CTRL9_TIMEOUT_US 100000
 
 #define SYSTEM_TURN_ON_MS 15
 #define GYRO_TURN_ON_MS 150
@@ -53,6 +59,9 @@
 #define SAMPLE_OFFSET 5 /* past TIMESTAMP (3) and TEMP (2) */
 
 static i2c_master_dev_handle_t s_dev;
+static int s_step;
+static int s_ctrl9_status = -1; /* last STATUSINT seen by ctrl9(), for diagnosis */
+static int32_t s_ctrl9_us = -1;  /* how long the last handshake took */
 
 static esp_err_t read_regs(uint8_t reg, uint8_t *out, size_t n)
 {
@@ -90,17 +99,24 @@ static esp_err_t ctrl9(uint8_t command)
     if (err != ESP_OK) {
         return err;
     }
+    /* Bounded by time, not by a count of reads: how long a read takes is the
+     * bus's business, how long the command takes is the part's. */
+    const int64_t start = esp_timer_get_time();
     bool done = false;
-    for (int i = 0; i < CTRL9_POLLS && !done; i++) {
+    while (!done && esp_timer_get_time() - start < CTRL9_TIMEOUT_US) {
         uint8_t status = 0;
         err = read_regs(REG_STATUSINT, &status, 1);
         if (err != ESP_OK) {
             return err;
         }
+        s_ctrl9_status = status;
         done = (status & STATUSINT_CMD_DONE) != 0;
     }
+    s_ctrl9_us = (int32_t)(esp_timer_get_time() - start);
     if (!done) {
-        return ESP_ERR_TIMEOUT;
+        /* Not ESP_ERR_TIMEOUT: the driver returns that for a bus timeout,
+         * and the two failures need telling apart. */
+        return ESP_ERR_NOT_FINISHED;
     }
     return write_reg(REG_CTRL9, CTRL9_CMD_ACK);
 }
@@ -120,12 +136,14 @@ esp_err_t qmi8658_init(i2c_master_bus_handle_t bus)
     /* Soft reset, so every boot starts from the same state; the MCU resets
      * without power-cycling the sensor. 0x4D reads 0x80 after a good reset
      * and may be overwritten later, so it is checked now and never again. */
+    s_step = 1; /* soft reset */
     err = write_reg(REG_RESET, RESET_COMMAND);
     if (err != ESP_OK) {
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(SYSTEM_TURN_ON_MS));
     uint8_t value = 0;
+    s_step = 2; /* reset result, WHO_AM_I */
     if ((err = read_regs(REG_RESET_RESULT, &value, 1)) != ESP_OK) return err;
     if (value != RESET_RESULT_OK) return ESP_ERR_INVALID_STATE;
     if ((err = read_regs(REG_WHO_AM_I, &value, 1)) != ESP_OK) return err;
@@ -133,6 +151,7 @@ esp_err_t qmi8658_init(i2c_master_bus_handle_t bus)
 
     /* ADDR_AI by read-modify-write: CTRL1.BE is left as reset sets it, the
      * setting the little-endian unpack was proven under. */
+    s_step = 3; /* CTRL1..5, FIFO bypass */
     uint8_t ctrl1 = 0;
     if ((err = read_regs(REG_CTRL1, &ctrl1, 1)) != ESP_OK) return err;
     if ((err = write_verified(REG_CTRL1, (uint8_t)(ctrl1 | CTRL1_ADDR_AI | CTRL1_INT2_EN))) != ESP_OK) return err;
@@ -144,13 +163,32 @@ esp_err_t qmi8658_init(i2c_master_bus_handle_t bus)
 
     /* 13.2.1: over I2C the internal AHB clock gating must be off for the lock
      * to be trustworthy. */
+    s_step = 4; /* AHB clock gating off */
+    if ((err = write_verified(REG_CTRL8, CTRL8_HANDSHAKE_STATUSINT)) != ESP_OK) return err;
     if ((err = write_verified(REG_CAL1_L, 0x01)) != ESP_OK) return err;
     if ((err = ctrl9(CTRL9_CMD_AHB_CLOCK_GATING)) != ESP_OK) return err;
 
+    s_step = 5; /* SyncSample on */
     if ((err = write_verified(REG_CTRL7, CTRL7_SYNC_6DOF)) != ESP_OK) return err;
     /* Gyro start-up: nothing sampled before this is believed. */
     vTaskDelay(pdMS_TO_TICKS(GYRO_TURN_ON_MS));
+    s_step = 6; /* done */
     return ESP_OK;
+}
+
+int32_t qmi8658_ctrl9_us(void)
+{
+    return s_ctrl9_us;
+}
+
+int qmi8658_ctrl9_status(void)
+{
+    return s_ctrl9_status;
+}
+
+int qmi8658_init_step(void)
+{
+    return s_step;
 }
 
 esp_err_t qmi8658_read_locked(qmi8658_sample *out)

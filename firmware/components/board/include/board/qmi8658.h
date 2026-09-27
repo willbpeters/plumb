@@ -31,4 +31,13 @@ esp_err_t qmi8658_init(i2c_master_bus_handle_t bus);
  * releases it. ESP_ERR_NOT_FOUND if Avail never came up. */
 esp_err_t qmi8658_read_locked(qmi8658_sample *out);
 
+/* The init stage reached: on failure, the stage that failed. */
+int qmi8658_init_step(void);
+
+/* The last STATUSINT read during a CTRL9 handshake, -1 if none. */
+int qmi8658_ctrl9_status(void);
+
+/* How long the last CTRL9 handshake took, in us; -1 if none ran. */
+int32_t qmi8658_ctrl9_us(void);
+
 #endif /* BOARD_QMI8658_H */
