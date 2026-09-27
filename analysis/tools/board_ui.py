@@ -23,6 +23,7 @@ SKETCH = REPO / "firmware" / "bringup-arduino" / "display"
 BUILD = SKETCH / "build"
 LVGL = REPO / "firmware" / "third_party" / "lvgl"
 UI = REPO / "firmware" / "components" / "plumb_ui"
+BOARD = REPO / "firmware" / "components" / "board"
 
 # Parent spec 14.2: 16 MB flash, QSPI PSRAM, and CDC-on-boot off (the CH343
 # bridge carries Serial, not native USB).
@@ -32,7 +33,9 @@ FQBN = ("esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,"
 
 def _flags() -> list[str]:
     ui, include, src = (p.as_posix() for p in (UI, UI / "include", UI / "src"))
-    extra = f"-DLV_CONF_INCLUDE_SIMPLE -I{ui} -I{include} -I{src}"
+    board, board_include = BOARD.as_posix(), (BOARD / "include").as_posix()
+    extra = (f"-DLV_CONF_INCLUDE_SIMPLE -I{ui} -I{include} -I{src} "
+             f"-I{board} -I{board_include}")
     return ["--library", LVGL.as_posix(),
             "--build-property", f"compiler.c.extra_flags={extra}",
             "--build-property", f"compiler.cpp.extra_flags={extra}"]
@@ -50,19 +53,22 @@ def flash(port: str) -> None:
                     "--input-dir", str(BUILD), str(SKETCH)], check=True)
 
 
-def send(port: str, commands: str, seconds: float) -> None:
+def send(port: str, commands: str, seconds: float, baud: int = 115200) -> None:
     """Write console characters and print what comes back.
 
     DTR and RTS are held low before the port opens so that opening it does
     not pulse the auto-download circuit (parent spec 14.1) -- tools/board.py
     measured that a naive open resets this board about half the time, and a
     reset here would silently throw away the state being inspected.
+
+    The display sketch's console runs at 115200; the product firmware's at
+    921600, imu_stream's rate.
     """
     import serial
 
     port_obj = serial.Serial()
     port_obj.port = port
-    port_obj.baudrate = 115200
+    port_obj.baudrate = baud
     port_obj.timeout = 0.1
     port_obj.dtr = False
     port_obj.rts = False
@@ -93,13 +99,14 @@ def main() -> None:
     s.add_argument("commands", nargs="?", default="")
     s.add_argument("--port", required=True)
     s.add_argument("--seconds", type=float, default=2.0)
+    s.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args()
     if args.action == "build":
         build()
     elif args.action == "flash":
         flash(args.port)
     else:
-        send(args.port, args.commands, args.seconds)
+        send(args.port, args.commands, args.seconds, args.baud)
 
 
 if __name__ == "__main__":

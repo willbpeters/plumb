@@ -16,7 +16,7 @@
 #include <lvgl.h>
 
 #include "cst816s.h"
-#include "gc9a01.h"
+#include "board/gc9a01.h"
 
 extern "C" {
 #include "plumb/ui.h"

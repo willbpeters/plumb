@@ -7,7 +7,7 @@
 // "tidied", for the same reason the C port keeps the Python's arithmetic
 // order -- a change nobody can explain is a defect nobody can find.
 
-#include "gc9a01.h"
+#include "board/gc9a01.h"
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
