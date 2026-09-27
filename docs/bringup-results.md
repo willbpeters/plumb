@@ -842,3 +842,73 @@ yet done).
 - The 120 MHz flash of parent §6.3 (not attempted: it needs `SPI_FLASH_HPM_ON` and a flash part
   that supports it) and `LV_MEMCPY_MEMSET_STD` (an LVGL 8 name; its LVGL 9 equivalent lives in
   the shared `lv_conf.h`).
+
+---
+
+## Where rendering's delay comes from — 2026-09-27
+
+Follows from the skeleton section above, which found that rendering on core 1 slowed the IMU
+reads on core 0 and, together with streaming, lost 0.72% of samples. Found one variable at a
+time, with the `j` report, which now splits each read's latency into three consecutive segments.
+
+### The split — measured, 30 s windows, µs
+
+| Segment | Armed p50 / max | Animating p50 / max | Rendering adds (p50) |
+|---|---|---|---|
+| Edge → task running | 7 / 14 | 10 / 70 | +3 |
+| STATUSINT read (1 byte) | 162 / 249 | 320 / 474 | **+158** |
+| Lock wait + burst (17 bytes) | 532 / 543 | 586 / 855 | +54 |
+
+The interrupt and the scheduler are not the problem. The delay is inside the I²C transfers,
+and mostly in the first one, although the second moves seventeen times the data. A bus or
+memory slowed by rendering would hurt the long transfer most. The pattern fits **code gone
+cold**: the I²C master driver runs from flash through the cache the two cores share, LVGL on
+core 1 evicts it in the ~1 ms between samples, and the first transfer of each sample pays the
+misses while the second finds the code warm.
+
+### Cause 1: the I²C driver evicted from the shared cache — confirmed and fixed
+
+The one change: a linker fragment (`firmware/components/board/linker.lf`) places ESP-IDF's
+`i2c_master` and `i2c_hal` objects in IRAM. ESP-IDF v5.5.5 keeps only the driver's ISR there
+by default; `I2C_ISR_IRAM_SAFE` would move four functions of the task-side path, not all of it.
+
+| Animating, gate open | latency p50 | p99 | max | lost |
+|---|---|---|---|---|
+| Driver in flash | 930 | 1033 | 1156 | 4 since boot (includes boot-time loss, below) |
+| **Driver in IRAM** | **700** | 958 | **1026** | 0 |
+| Armed, for reference | 700 | 707 | 732 | 0 |
+
+**Streaming while animating: 391 of 54,568 lost before, 0 of 55,064 after.** The worst read
+now finishes inside the 1103 µs sample period. The cost is internal RAM: heap free fell from
+52,947 to 38,711 B, about 12 KB of it this move (the record also grew 4 bytes, 2 KB across the
+ring; the new histograms are in PSRAM).
+
+### Cause 2: touch polling on the shared bus — the remaining tail, confirmed
+
+With the driver in IRAM, the median while animating equals the armed median, and what is left
+is a tail in about 1–3% of samples: STATUSINT p99 319 against 169, burst p99 786 against 539.
+
+| Gate open | latency p50 | p99 | max |
+|---|---|---|---|
+| Nothing rendering, touch polled | 714 | 937 | 973 |
+| Animating, touch polled | 700 | 958 | 1026 |
+| **Animating, touch polling off** (a temporary build) | **714** | **729** | **745** |
+
+LVGL reads the touch controller every 30 ms, about one IMU sample in 27. A 5-byte touch read
+holds the shared bus for about 150–250 µs, the size of the extra time, and it lands in
+whichever of the two IMU transfers it collides with. It is independent of rendering, and the
+gate already stops it during a stroke (invariant 8; parent §6.4). Outside a stroke it costs
+latency, not samples: 0 lost in every window with it.
+
+If the tail ever matters outside a stroke, the fix is to schedule, not to suspend. A touch read
+fits in the ~400 µs the bus is free after each IMU read, so the app could poll touch right after
+an IMU read completes instead of on LVGL's own timer. Not done; it is a design decision.
+
+### Open: samples lost in the first second after boot
+
+Across 12 resets, 10 boots lost samples in the first ~0.9 s: usually 1 lost and 1 duplicated,
+once 2 and 2, and once **24 lost** (the acquisition task starved for about 26 ms). It never
+grows after boot; a 60 s stream afterwards added nothing. The leading suspect, not yet tested:
+the touch controller's init on core 1, which starts while the IMU is already running, and whose
+reads have a 10 ms timeout; a controller still waking from reset could hold the bus that long.
+It matters once sleep and wake (§9) put a boot, or a wake, right before a stroke.

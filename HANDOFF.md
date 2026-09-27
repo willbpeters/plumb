@@ -213,12 +213,17 @@ Nothing is blocked on code any more. In order of what unblocks the most:
 **0. What the firmware skeleton leaves (2026-09-27).** `firmware/` is the product build now.
 Still to do on it, in order:
 
-- **Find where rendering's delay comes from** before anything writes flash during a stroke.
-  Acquisition is on core 0 and still slowed by rendering on core 1; the two suspects are the
-  cache the cores share and the UART interrupt, which was installed from core 0. Measure with the
-  `j` report: move the UART interrupt to core 1, then put the acquisition path and I²C ISR in
-  IRAM, one at a time. §11 logging makes this urgent, because flash writes stall both cores'
-  cache.
+- **Rendering's delay: found and fixed (2026-09-27).** Rendering evicted the I²C driver from the
+  shared cache; the driver now runs from IRAM (`board/linker.lf`). Streaming while animating
+  went from 0.72% lost to 0 of 55,064. The remaining tail is touch polling on the shared bus,
+  which the gate already suspends during strokes. The UART interrupt was never the cause.
+  `docs/bringup-results.md`, last section.
+- **Samples lost in the first second after boot** (10 of 12 boots, usually 1, once 24). The
+  suspect is the touch controller's init holding the bus; untested. It matters once a wake
+  (§9) sits right before a stroke.
+- **Before §11 logging:** flash writes disable the cache for both cores. The I²C driver is now in
+  IRAM, but the acquisition task, `qmi8658.c` and the GPIO ISR dispatch are not. Anything that
+  writes flash while the IMU runs needs those in IRAM too, measured with `j`.
 - Fonts to PSRAM (invariant 7 permits it; they are in flash-mapped rodata now), the final
   rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
   asks for it; not attempted, reasons in the skeleton spec).

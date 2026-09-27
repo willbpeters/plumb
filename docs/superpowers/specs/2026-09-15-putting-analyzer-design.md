@@ -350,6 +350,13 @@ structurally:
   sample period. Rendering and streaming together lost 391 of 54,568 samples (0.72%). With
   the gate below armed, the same load lost none (54,720 samples), with latency p99 707 µs and
   maximum 820 µs. The rule in the next paragraph is therefore measured, not assumed.
+
+  The cause was then found (`docs/bringup-results.md`, "Where rendering's delay comes from").
+  Rendering on core 1 evicted the I²C driver's code from the cache the two cores share. With
+  the driver run from IRAM, the median read latency while rendering equals the armed median,
+  and streaming while rendering lost 0 of 55,064 samples. What is left is touch polling on the
+  shared bus, which the gate already suspends during a stroke. So the gate is no longer the
+  only thing preventing loss, but it remains what keeps the stroke's timing tail at its floor.
 - **Core 1** — LVGL rendering, UI state, storage writes, power management.
 
 During an armed stroke, the UI renders nothing. The screen displays a result only after
