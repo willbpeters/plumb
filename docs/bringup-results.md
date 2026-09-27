@@ -11,6 +11,7 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 |---|---|---|
 | 2026-09-21 | `imu_stream` | Waveshare ESP32-S3-Touch-LCD-1.28 |
 | 2026-09-22 | `imu_stream` | same board — §9.1 axes and signs |
+| 2026-09-26 | `display` | same board — display and touch bring-up |
 
 ---
 
@@ -638,3 +639,90 @@ normal. That is a property of the mount, not of the board, and it cannot be
 measured until a base is printed and the puck seats in a grip at a known
 clocking. This section establishes only that the three channels are what they
 say they are, in the order and handedness the algorithm expects.
+
+---
+
+## Display and touch bring-up — 2026-09-26
+
+Produced by `firmware/bringup-arduino/display` (design:
+`docs/superpowers/specs/2026-09-26-display-bringup-design.md`), built and flashed with
+`analysis/tools/board_ui.py`. Visual checks were made by Will at the board; everything else
+was read back over serial.
+
+**Status: the display renders, touch works, and the host-proven screens run unchanged on the
+panel.** Phase 0's "display renders" item is closed.
+
+### Pins — from the schematic, confirmed by the hardware working
+
+Read from the Waveshare ESP32-S3-Touch-LCD-1.28 **Rev3** schematic, not measured; the panel
+initialising, drawing and taking touches on exactly these pins is the confirmation.
+
+| Net | GPIO | Net | GPIO |
+|---|---|---|---|
+| LCD_DC | 8 | I2C1 SDA (touch + IMU) | 6 |
+| LCD_CS | 9 | I2C1 SCL (touch + IMU) | 7 |
+| LCD_CLK | 10 | TP_INT | 5 |
+| LCD_MOSI | 11 | TP_RST | 13 |
+| LCD_MISO | 12 (unused) | IMU_INT1 / INT2 | 4 / 3 |
+| LCD_RST | 14 | BAT_ADC | 1 |
+| LCD_BL | 2 (low-side MOSFET, active high) | | |
+
+### Orientation and colour — measured, by eye
+
+| Setting | Value | How it was found |
+|---|---|---|
+| `MADCTL` | **0x48** (MX + BGR) | BGR alone (0x08) drew every glyph mirrored left to right; setting MX fixed it. Quadrant colours, positions and edge labels then all correct, USB-C toward the viewer. |
+| Inversion | **on** (INVON, 21h) | Colours correct with it on; not changed. |
+| SPI clock | **80 MHz** | No artifacts seen, so the 40 MHz fallback was not needed. |
+
+Touch coordinates need no remapping: a swipe from right to left runs from x ≈ 220 to
+x ≈ 100 in the panel's own coordinates.
+
+### Full-screen refresh — measured
+
+Render plus flush of the whole 240 × 240 screen, at rest after each screen's motion, via
+`lv_refr_now()` timed with `micros()`. Two passes, identical to the microsecond.
+
+| Screen | Full refresh |
+|---|---|
+| idle | 15.8 ms |
+| face angle | 20.7 ms |
+| tempo | 18.6 ms |
+| path | 17.3 ms |
+| impact speed | 20.0 ms |
+| test pattern | 23.9 ms |
+
+The SPI transfer alone is 115,200 bytes at 80 MHz = 11.5 ms, so rendering costs 4–9 ms per
+full screen. Against parent spec goal 1's 500 ms from follow-through to result, drawing is
+negligible.
+
+Buffers: 2 × 28,800 B from `MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA` (invariant 7). Internal heap
+free after init: 182,520 B. Missing glyphs: 0.
+
+### Touch — measured
+
+The controller answers at 0x15 with **chip ID 0xB5**. Common drivers read 0xB5 as the
+**CST816T**, not the CST816S the board documentation names. The coordinate registers behave
+identically, which is all this uses. Swipe log (Will, three lefts and a right):
+
+```
+touch 225 127  gesture LEFT -> next       release 163 130
+touch 228 185                             release 225 186   (3 px: a tap, no gesture)
+touch 213 104  gesture LEFT -> next       release 132 121
+touch 218 114  gesture LEFT -> next       release 103 134
+touch 208 135  gesture LEFT -> next       release 127 145
+touch  36 146  gesture RIGHT -> previous  release  93 146
+```
+
+Every swipe produced the gesture in the right direction, and the screen changed each time.
+
+### Charger — read from the schematic, NOT measured, and it matters before a cell is bought
+
+The Rev3 schematic shows the charger as **ETA6098**. Parent spec §4.2 and §4.4 say ETA6096,
+rated to 800 mA. Its current-set resistor R15 is **160 kΩ**, which the schematic's own table
+maps to **1 A** (82 kΩ → 2 A, 66 kΩ → 2.5 A). On the parent spec's 400 mAh cell that is
+**2.5C**, against §4.4's limit of 1C.
+
+Not yet confirmed: the charge current on the bench, the value against the ETA6098 datasheet
+rather than the schematic's table, and that this board is Rev3 (check the silkscreen). Until
+then, treat 1 A as the charge current, and fit a cell of at least 1000 mAh or change R15.

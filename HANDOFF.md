@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries five marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries six marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -54,7 +54,8 @@ The blocking defect is gone.
 | **Pivot offset estimation** | `plumb/pivot.py` — velocity form, noise-corrected. Closes the 61% path shortfall; arc now 0.996–1.002 of truth noiselessly for every putter type, and the session mean under 0.28 dps no longer depends on putter type (straight 1.006, arced 1.010 at lie 5). |
 | **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, and across a whole replayed stroke, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source, FMA contraction off on both. |
 | **Single precision, whole stroke** | **4.0×10⁻⁵° of face angle at worst** over ~1,850 accumulated steps, against a 1.0° target. A 30 s address hold does not grow it. Safe for the attitude integrator; see `real.h`. |
-| **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. **Not yet on the board**: the display has never been brought up. |
+| **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. |
+| **Display and touch, on the board** | `firmware/bringup-arduino/display` — the same screens on the GC9A01 panel, swipe with the touch controller, verified by Will at the board 2026-09-26. `MADCTL` 0x48, inversion on, SPI 80 MHz, full-screen refresh 15.8–20.7 ms per screen. Build and flash with `uv run python -m tools.board_ui flash --port COM4`. Pins and measurements in `docs/bringup-results.md`. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
 
 **What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
@@ -208,14 +209,16 @@ compares against ground truth.
 
 Nothing is blocked on code any more. In order of what unblocks the most:
 
-**0. Bring the display up and put the screens on it.** The screens are proven on the host. What
-remains is the GC9A01 driver, LVGL's tick and flush on the device, touch-to-swipe
-(`pl_ui_next`/`pl_ui_prev`), fonts in PSRAM and draw buffers in internal SRAM (invariant 7), and
-the app task that stops calling `lv_timer_handler()` between arm and follow-through
-(invariant 8). Two things the host bench taught that the device build must carry: use
-`LV_COLOR_FORMAT_DEFAULT`, not `LV_COLOR_DEPTH` (9.6 deprecates it and its `#warning` is fatal
-under MSVC), and LVGL 9.6 has two sources named `vg_lite_matrix.c`, so any build that puts all
-objects in one directory silently links one of them.
+**0. The display is up (2026-09-26); what it leaves for the real firmware.** The screens run on
+the panel from `firmware/bringup-arduino/display`, which is a bring-up instrument. The product
+build still needs: the ESP-IDF project itself, the app task that stops calling
+`lv_timer_handler()` between arm and follow-through (invariant 8), fonts moved to PSRAM
+(invariant 7; they sit in flash-mapped rodata in the sketch), and the final rotation once the
+base fixes how the board sits in the grip. Carry over from the bring-up: `MADCTL` 0x48 with
+inversion on, `lv_draw_rgb565_swap` in the flush, and the `esp_lcd` driver in
+`display/gc9a01.c`, which is already ESP-IDF code. From the host bench: use
+`LV_COLOR_FORMAT_DEFAULT`, not `LV_COLOR_DEPTH` (its `#warning` is fatal under MSVC), and LVGL
+9.6 has two sources named `vg_lite_matrix.c`.
 
 **1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
 the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
@@ -272,10 +275,11 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Five amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+Six amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
 one new section. The three to §6.4 came from reading the datasheet or measuring the hardware;
 the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
-records what the path code has actually done since the pivot estimate went in.
+records what the path code has actually done since the pivot estimate went in; the §4.4 one
+records the charger the schematic actually shows.
 
 | § | Was | Now | Why |
 |---|---|---|---|
@@ -284,6 +288,7 @@ records what the path code has actually done since the pivot estimate went in.
 | 6.4 | "FIFO batching is mandatory" | **direct register polling** | Measured: the FIFO loses 21.9% of samples and cannot count what it loses; direct polling loses none. The original bus-cost argument confused transaction overhead with data volume. |
 | 11 | ≈9 KB per stroke, ~1,400 strokes | **≈16 KB, ~800 strokes** | Storage estimate was still computed at 500 Hz. Recomputed at 896.8 Hz: 1,345 samples × 12 B against the ~13 MB partition, before headers. Amended 2026-09-22. |
 | 7.4 | `v_face = ω × r` | **`r + d`, `d` fitted per stroke and per golfer** | The sensor translates; the stroke rotates about the hands. The code has estimated `d` since `9516b6f` without a spec amendment; recorded 2026-09-25 with the velocity-form fit that replaced the acceleration form. |
+| 4.4 | ETA6096, ≤ 800 mA | **ETA6098, 1 A** (R15 = 160 kΩ) | Read from the Rev3 schematic at display bring-up, as §4.4 asks. 2.5C on the planned 400 mAh cell. Not yet bench-measured. Amended 2026-09-26. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.
@@ -351,7 +356,10 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
   has not started. If the mount resonates below ~200 Hz, §5.5's escalation runs *before* any
   further firmware work.
 - **A LiPo with an MX1.25 connector** — §4.4. Most hobby cells ship JST-PH, which will not mate.
-  Meter the polarity before first connection.
+  Meter the polarity before first connection. **And not 400 mAh:** the schematic shows the
+  charger set to **1 A** (ETA6098, R15 = 160 kΩ), which is 2.5C on the spec's 400 mAh cell.
+  Fit at least 1000 mAh, or change R15; confirm the board is Rev3 from its silkscreen first.
+  Spec §4.4 amended 2026-09-26; details in `docs/bringup-results.md`.
 - **The 906.86 Hz decision.** See next task 2.
 
 **Resolved:** the blade putter's grip has an **open butt cap**, so the §5.1 barbed-taper base

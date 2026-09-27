@@ -229,6 +229,14 @@ These are build-time hazards with permanent consequences and are called out expl
    should be used.
 5. **Protection circuit.** Only cells with an integrated PCM are acceptable.
 
+*Amended 2026-09-26.* Item 4 and the charger row in §4.2 name the ETA6096. The Waveshare Rev3
+schematic, read at display bring-up as item 4 asks, shows an **ETA6098**, with R15 = 160 kΩ,
+which the schematic's own table maps to **1 A** charge current. The 400 mAh cell in §4.1 would
+charge at 2.5C, so it fails item 4 as written: fit a cell of at least 1000 mAh, or change R15.
+Read from the schematic's table, not the chip datasheet, and not yet measured on the bench;
+the board's revision still needs confirming against its silkscreen. Recorded in
+`docs/bringup-results.md`.
+
 ---
 
 ## 5. Mechanical design
