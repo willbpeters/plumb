@@ -23,6 +23,11 @@ static TaskHandle_t s_starter;
 static esp_err_t s_init_result;
 static volatile uint32_t s_edge_us;
 
+static uint16_t clamp16(uint32_t us)
+{
+    return us > 0xFFFFu ? 0xFFFFu : (uint16_t)us;
+}
+
 static void drdy_isr(void *arg)
 {
     (void)arg;
@@ -69,6 +74,7 @@ static void acq_task(void *arg)
             s_counters.drdy_timeouts++;
             continue;
         }
+        const uint32_t wake_us = (uint32_t)esp_timer_get_time();
         const uint32_t edge_us = s_edge_us;
         qmi8658_sample sample;
         const esp_err_t err = qmi8658_read_locked(&sample);
@@ -95,6 +101,8 @@ static void acq_task(void *arg)
         memcpy(record.gyro, sample.gyro, sizeof(record.gyro));
         record.edge_us = edge_us;
         record.done_us = done_us;
+        record.wake_us = clamp16(wake_us - edge_us);
+        record.status_us = clamp16(sample.status_done_us - edge_us);
         record.edges = (uint8_t)(edges > 255 ? 255 : edges);
         record.statusint = sample.statusint;
         record.polls = sample.polls;

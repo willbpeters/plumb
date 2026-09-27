@@ -6,6 +6,7 @@
 #include "acq/frame.h"
 #include "acq/jitter.h"
 #include "acq/seqcount.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "gate.h"
 #include "uart_io.h"
@@ -24,6 +25,12 @@ static acq_hist s_latency;
 static uint32_t s_window_start_us;
 static bool s_window_armed;
 static bool s_window_mixed;
+/* The latency, split into its three consecutive segments: edge to the task
+ * running, the STATUSINT read, and the lock wait plus the burst. Rendering
+ * lengthens the total; these say which part. Allocated in PSRAM at init. */
+static acq_hist *s_wake;
+static acq_hist *s_statusint;
+static acq_hist *s_burst;
 
 /* The stream to the host. */
 static bool s_streaming;
@@ -39,6 +46,11 @@ static void window_reset(void)
 {
     acq_hist_reset(&s_interval);
     acq_hist_reset(&s_latency);
+    if (s_wake) {
+        acq_hist_reset(s_wake);
+        acq_hist_reset(s_statusint);
+        acq_hist_reset(s_burst);
+    }
     s_window_start_us = (uint32_t)esp_timer_get_time();
     s_window_armed = gate_armed();
     s_window_mixed = false;
@@ -48,6 +60,18 @@ void stream_init(void)
 {
     s_ring = acq_ring_handle();
     acq_seqcount_reset(&s_boot);
+    /* PSRAM: diagnostic counts, written a few times a millisecond by core 1,
+     * kept out of the internal budget the acquisition path lives in. */
+    s_wake = heap_caps_malloc(sizeof(acq_hist), MALLOC_CAP_SPIRAM);
+    s_statusint = heap_caps_malloc(sizeof(acq_hist), MALLOC_CAP_SPIRAM);
+    s_burst = heap_caps_malloc(sizeof(acq_hist), MALLOC_CAP_SPIRAM);
+    if (!s_wake || !s_statusint || !s_burst) {
+        uart_io_printf("# latency segments unavailable: out of PSRAM\n");
+        heap_caps_free(s_wake);
+        heap_caps_free(s_statusint);
+        heap_caps_free(s_burst);
+        s_wake = s_statusint = s_burst = NULL;
+    }
     window_reset();
 }
 
@@ -109,6 +133,11 @@ void stream_service(void)
                 acq_hist_add(&s_interval, r.edge_us - s_prev_edge_us);
             }
             acq_hist_add(&s_latency, r.done_us - r.edge_us);
+            if (s_wake) {
+                acq_hist_add(s_wake, r.wake_us);
+                acq_hist_add(s_statusint, (uint32_t)(r.status_us - r.wake_us));
+                acq_hist_add(s_burst, (r.done_us - r.edge_us) - r.status_us);
+            }
             s_prev_index = index;
             s_prev_edge_us = r.edge_us;
             s_have_prev = true;
@@ -173,6 +202,11 @@ void stream_jitter_report(void)
                    (now - s_window_start_us) / 1e6, gate);
     print_hist("interval_us", &s_interval);
     print_hist("latency_us", &s_latency);
+    if (s_wake) {
+        print_hist("  wake_us", s_wake);
+        print_hist("  statusint_us", s_statusint);
+        print_hist("  burst_us", s_burst);
+    }
     window_reset();
 }
 

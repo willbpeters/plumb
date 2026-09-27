@@ -15,6 +15,8 @@ typedef struct {
     int16_t gyro[3];     /* GX, GY, GZ, raw counts */
     uint32_t edge_us;    /* esp_timer at the DRDY rising edge, low 32 bits */
     uint32_t done_us;    /* esp_timer when the burst read completed */
+    uint16_t wake_us;    /* edge to the task running, us (saturates) */
+    uint16_t status_us;  /* edge to the STATUSINT read that saw Avail ending, us (saturates) */
     uint8_t edges;       /* DRDY edges since the previous read: 1 unless the task fell behind */
     uint8_t statusint;   /* STATUSINT as first seen with Avail set: bit 0 Avail, bit 1 Locked */
     uint8_t polls;       /* STATUSINT reads it took to see Avail */

@@ -22,6 +22,7 @@ typedef struct {
     int16_t gyro[3];
     uint8_t statusint;  /* STATUSINT when Avail was first seen */
     uint8_t polls;      /* STATUSINT reads it took */
+    uint32_t status_done_us; /* esp_timer when the STATUSINT read that saw Avail ended */
 } qmi8658_sample;
 
 /* Reset, verify and configure the part, leaving DRDY pulsing on INT2. */

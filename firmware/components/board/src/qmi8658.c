@@ -208,6 +208,7 @@ esp_err_t qmi8658_read_locked(qmi8658_sample *out)
     if (!(status & QMI8658_STATUSINT_AVAIL)) {
         return ESP_ERR_NOT_FOUND;
     }
+    out->status_done_us = (uint32_t)esp_timer_get_time();
     if (!(status & QMI8658_STATUSINT_LOCKED)) {
         /* Locking is in progress and completes within Data_Lock_Delay. */
         esp_rom_delay_us(DATA_LOCK_DELAY_US);
