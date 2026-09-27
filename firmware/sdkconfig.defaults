@@ -1,0 +1,30 @@
+# The one firmware configuration, and the one that gets validated
+# (invariant 6). sdkconfig, generated from this, is committed alongside it.
+CONFIG_IDF_TARGET="esp32s3"
+
+# Parent spec 14.2: 16 MB flash, quad PSRAM (the R2 part; not octal).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Parent spec 6.3.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+
+# 1 ms ticks: the app loop's vTaskDelay(1) is one millisecond.
+CONFIG_FREERTOS_HZ=1000
+
+# The console at imu_stream's rate, so capture.py and the boot log share a baud.
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# LVGL builds from plumb_ui/lv_conf.h (LV_KCONFIG_IGNORE in CMakeLists.txt);
+# these two are read by LVGL's CMake, not its headers.
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n
