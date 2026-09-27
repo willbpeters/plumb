@@ -1,6 +1,6 @@
 # Handoff — Plumb
 
-**Date:** 2026-09-25
+**Date:** 2026-09-27 (firmware skeleton added; the rest as of 2026-09-25)
 **For:** Claude Code, picking this project up cold
 **Supersedes:** the 2026-09-21 handoff. What changed since is under "This session
 (2026-09-25)" below; everything else still stands.
@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries six marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries seven marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -57,6 +57,7 @@ The blocking defect is gone.
 | **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. |
 | **Display and touch, on the board** | `firmware/bringup-arduino/display` — the same screens on the GC9A01 panel, swipe with the touch controller, verified by Will at the board 2026-09-26. `MADCTL` 0x48, inversion on, SPI 80 MHz, full-screen refresh 15.8–20.7 ms per screen. Build and flash with `uv run python -m tools.board_ui flash --port COM4`. Pins and measurements in `docs/bringup-results.md`. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
+| **ESP-IDF firmware skeleton** (2026-09-27) | `firmware/` on ESP-IDF v5.5.5, now what the board runs. IMU read on core 0, woken by its own DRDY line (INT2 → GPIO3) in SyncSample mode; UI on core 1; the invariant-8 gate as an atomic flag (`a`/`o` on the console for now). **0 of 54,653 samples lost in 60 s at rest**, through `capture.py` unchanged. **Rendering pushes read latency past the 1103 µs period, and with streaming lost 0.72%; with the gate armed, 0 lost and latency max 820 µs.** No radio code linked, checked on every build. The IMU comes up on 60 of 60 resets. Build: `firmware/idf.ps1 build`, flash: `firmware/idf.ps1 -p COM4 flash`. Everything in `docs/bringup-results.md`, last section. |
 
 **What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
 demonstrate that the pipeline agrees with the generator's model of a stroke, not that it is
@@ -209,16 +210,20 @@ compares against ground truth.
 
 Nothing is blocked on code any more. In order of what unblocks the most:
 
-**0. The display is up (2026-09-26); what it leaves for the real firmware.** The screens run on
-the panel from `firmware/bringup-arduino/display`, which is a bring-up instrument. The product
-build still needs: the ESP-IDF project itself, the app task that stops calling
-`lv_timer_handler()` between arm and follow-through (invariant 8), fonts moved to PSRAM
-(invariant 7; they sit in flash-mapped rodata in the sketch), and the final rotation once the
-base fixes how the board sits in the grip. Carry over from the bring-up: `MADCTL` 0x48 with
-inversion on, `lv_draw_rgb565_swap` in the flush, and the `esp_lcd` driver in
-`display/gc9a01.c`, which is already ESP-IDF code. From the host bench: use
-`LV_COLOR_FORMAT_DEFAULT`, not `LV_COLOR_DEPTH` (its `#warning` is fatal under MSVC), and LVGL
-9.6 has two sources named `vg_lite_matrix.c`.
+**0. What the firmware skeleton leaves (2026-09-27).** `firmware/` is the product build now.
+Still to do on it, in order:
+
+- **Will checks the screens and swipes on the new firmware** (skeleton done-means 3): send `r`,
+  then swipe. It is the only done-means not yet met.
+- **Find where rendering's delay comes from** before anything writes flash during a stroke.
+  Acquisition is on core 0 and still slowed by rendering on core 1; the two suspects are the
+  cache the cores share and the UART interrupt, which was installed from core 0. Measure with the
+  `j` report: move the UART interrupt to core 1, then put the acquisition path and I²C ISR in
+  IRAM, one at a time. §11 logging makes this urgent, because flash writes stall both cores'
+  cache.
+- Fonts to PSRAM (invariant 7 permits it; they are in flash-mapped rodata now), the final
+  rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
+  asks for it; not attempted, reasons in the skeleton spec).
 
 **1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
 the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
@@ -275,11 +280,11 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Six amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+Seven amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
 one new section. The three to §6.4 came from reading the datasheet or measuring the hardware;
 the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
 records what the path code has actually done since the pivot estimate went in; the §4.4 one
-records the charger the schematic actually shows.
+records the charger the schematic actually shows; the §6.2 one records data-ready pacing.
 
 | § | Was | Now | Why |
 |---|---|---|---|
@@ -289,6 +294,7 @@ records the charger the schematic actually shows.
 | 11 | ≈9 KB per stroke, ~1,400 strokes | **≈16 KB, ~800 strokes** | Storage estimate was still computed at 500 Hz. Recomputed at 896.8 Hz: 1,345 samples × 12 B against the ~13 MB partition, before headers. Amended 2026-09-22. |
 | 7.4 | `v_face = ω × r` | **`r + d`, `d` fitted per stroke and per golfer** | The sensor translates; the stroke rotates about the hands. The code has estimated `d` since `9516b6f` without a spec amendment; recorded 2026-09-25 with the velocity-form fit that replaced the acceleration form. |
 | 4.4 | ETA6096, ≤ 800 mA | **ETA6098, 1 A** (R15 = 160 kΩ) | Read from the Rev3 schematic at display bring-up, as §4.4 asks. 2.5C on the planned 400 mAh cell. Not yet bench-measured. Amended 2026-09-26. |
+| 6.2 | "hardware-timer driven" | **paced by the IMU's DRDY line** | A timer on the ESP32's clock drifts against the IMU's 906.86 Hz and would duplicate or miss ~1 sample in 100. Amended 2026-09-27 with the skeleton's loss and jitter measurements. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.
@@ -308,6 +314,12 @@ evidence.
 - **CTRL1.ADDR_AI defaults to 0**, so burst reads do not advance the register address. Correct
   for FIFO_DATA by accident; silently wrong for the output registers, where it would have
   returned twelve copies of AX_L and a standard deviation that meant nothing.
+- **INT2 needs `CTRL1` bit 4, which rev A marks reserved** (2026-09-27). Without it no DRDY edge
+  ever arrives.
+- **The CTRL9 handshake takes 3253 µs**, measured on every boot; imu_stream's 50-read budget
+  was ~3.2 ms and failed on 7 to 11 boots in 40 on the new firmware. Now bounded by time.
+- **A reset mid-read leaves the IMU holding SDA.** ESP-IDF's bus clear does not free it; nine
+  clocks and a STOP, before the driver takes the pins, does (`board/src/i2c_bus.c`).
 - **Turn-on time is two numbers.** System Turn On Time is 15 ms (initialisation, during which
   the datasheet says not to write at all); Gyro Turn On Time is 150 ms + 3/ODR (before the
   output means anything). The earlier handoff conflated them.
@@ -361,6 +373,7 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
   Fit at least 1000 mAh, or change R15; confirm the board is Rev3 from its silkscreen first.
   Spec §4.4 amended 2026-09-26; details in `docs/bringup-results.md`.
 - **The 906.86 Hz decision.** See next task 2.
+- **Look at the screens on the new firmware** and swipe; see next task 0.
 
 **Resolved:** the blade putter's grip has an **open butt cap**, so the §5.1 barbed-taper base
 works as specified. No step-drilling needed.
@@ -369,7 +382,15 @@ works as specified. No step-drilling needed.
 
 ## Working with the board
 
-It answers on **COM4** (CH343 USB-serial bridge, VID 0x1A86, PID 0x55D3). From the repo root:
+It answers on **COM4** (CH343 USB-serial bridge, VID 0x1A86, PID 0x55D3).
+
+**It runs the product firmware now** (since 2026-09-27). From `firmware/` in PowerShell:
+`./idf.ps1 build`, `./idf.ps1 -p COM4 flash`. Console at 921600: `s` stream, `b`/`c` format,
+`a`/`o` arm/open the gate, `x` cycle screens (the rendering load), `j` jitter report, `r`
+example result, `n`/`p` screens, `?` status. `capture.py` works on it unchanged. Read it
+without resetting it: `uv run python -m tools.board_ui send "?" --port COM4 --baud 921600`.
+
+The bring-up sketches still build, and flashing one replaces the firmware:
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=enabled,CDCOnBoot=default" firmware/bringup-arduino/imu_stream

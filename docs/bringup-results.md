@@ -726,3 +726,121 @@ maps to **1 A** (82 kΩ → 2 A, 66 kΩ → 2.5 A). On the parent spec's 400 mAh
 Not yet confirmed: the charge current on the bench, the value against the ETA6098 datasheet
 rather than the schematic's table, and that this board is Rev3 (check the silkscreen). Until
 then, treat 1 A as the charge current, and fit a cell of at least 1000 mAh or change R15.
+
+---
+
+## ESP-IDF firmware skeleton — 2026-09-27
+
+Produced by `firmware/` (ESP-IDF v5.5.5; design:
+`docs/superpowers/specs/2026-09-27-firmware-skeleton-design.md`, plan:
+`docs/superpowers/plans/2026-09-27-firmware-skeleton.md`). Build and flash with
+`firmware/idf.ps1 build` and `firmware/idf.ps1 -p COM4 flash`. The console runs at 921600;
+`uv run python -m tools.board_ui send "?" --port COM4 --baud 921600` reads the status.
+
+**Status: acquisition on core 0 is paced by the IMU's DRDY line and loses nothing at rest; the
+UI runs on core 1; the invariant-8 gate is measured to remove the loss and the timing tail that
+rendering causes.** The screens and swipes on this firmware are not yet checked by eye.
+
+### Loss — measured, from the sensor's own sample counter
+
+| Condition | Samples | Lost | How |
+|---|---|---|---|
+| At rest, 60 s | 54,653 | **0** | `tools.capture --read-path direct`, unchanged; 906.93 Hz |
+| Streaming + UI rendering continuously, 60 s | 54,177 | **391 (0.72%)** | also 222 duplicates, 89 wake-ups with no sample, 82 missed edges on the board's counters |
+| Streaming + UI rendering requested, **gate armed**, 60 s | 54,720 | **0** | board counters did not move |
+| UI rendering, not streaming, 30 s windows | ~28,600 each | 0, then 1 | the since-boot counter |
+
+The measured rate, 906.93 Hz, agrees with imu_stream's 906.86 Hz from 2026-09-21 on a different
+firmware and a different read path.
+
+### Jitter — measured, 30 s windows, printed by `j`
+
+Interval is between successive DRDY edges (ISR timestamps). Latency is from the edge to the end
+of the locked read. Both are in µs, from a 1 µs histogram; percentiles are nearest-rank.
+
+| Window | interval p50 / p99 / p99.9 / max | latency min / p50 / p99 / p99.9 / max |
+|---|---|---|
+| UI rendering continuously, gate open | 1103 / 1107 / 1110 / 1113 | 702 / 926 / 1025 / 1088 / **1148** |
+| Same load requested, **gate armed** | 1103 / 1103 / 1106 / 1107 | 699 / 699 / 707 / 709 / **820** |
+
+A first pair of windows, before the init fixes below, agreed to within a few µs (animating:
+latency p50 918, max 1145; armed: p50 699, max 821).
+
+What the numbers say:
+
+- **The DRDY edges are steady under any load.** The intervals barely move, so the sensor's clock
+  and the GPIO interrupt are not what rendering disturbs.
+- **The read is what rendering slows.** Rendering moves the median read latency from 699 to
+  926 µs, and it sets a tail that passes the 1103 µs sample period. The lock holds one sample
+  from STATUSINT to GZ_H, and the datasheet says samples arriving while it is held are dropped
+  (§13.2.3). That fits the losses under rendering and streaming together.
+- **Where the delay comes from is not yet measured.** Acquisition is on core 0 and the ring
+  never overflowed, so core 0 itself is being slowed. The two suspects are the cache the two
+  cores share (LVGL on core 1 runs from flash and evicts core 0's I²C and task code) and the
+  UART driver's interrupt, which was installed from core 0. The fixes, if they are wanted, are
+  known: the acquisition path and the I²C ISR in IRAM, and the UART interrupt moved to core 1.
+  **This matters for §11 logging:** flash writes stall the cache for both cores, so writing
+  strokes to flash during a stroke would be the same problem, only worse.
+
+### Wi-Fi absent — checked by the build, and the check shown to fire
+
+`firmware/tools/check_no_radio.py` runs after every link and fails the build if any radio
+archive (`libesp_wifi.a`, `libnet80211.a`, `libbt.a`, …) contributed to the image. Two things
+were learned making it trustworthy:
+
+- **Matching symbol names does not work.** The first real map named Wi-Fi in lines that are
+  not radio code: ROM function addresses from the chip's linker script
+  (`wifi_get_macaddr = 0x40005ab4`), and esp_hw_support's `wifi_bt_common_module_enable`, a
+  peripheral-clock helper every build links. The check matches archives.
+- **A canary build that links `esp_wifi_init()` fails it**, naming `libesp_wifi.a` and
+  `libnet80211.a`. That build also overflows static DRAM by 21.5 KB, so the link itself fails
+  before the post-link step runs; the check was run by hand on the map the linker wrote.
+
+### The datasheet, corrected by the board
+
+- **INT2 needs `CTRL1` bit 4.** Rev A's register table marks `CTRL1` bits 4:3 reserved. With them
+  clear, no DRDY edge reached GPIO3: zero reads, and DRDY timeouts climbing at 10 per second.
+  With bit 4 set, reads run at the sample rate. QMI8658A material and SensorLib name bit 4
+  INT2_EN and bit 3 INT1_EN.
+- **The CTRL9 handshake takes 3253 µs, every time.** The AHB-clock-gating command (0x12) was
+  timed on every boot that reached it after the diagnostic went in: 96 boots, 3253–3254 µs.
+  The first version of this driver copied imu_stream's budget of 50 STATUSINT reads, about
+  3.2 ms at 400 kHz, right at that edge, and the handshake failed on 7 to 11 boots in 40. The
+  poll is now bounded by time (100 ms). `CTRL8.bit7` is also set, which the register table says makes STATUSINT bit 7
+  the handshake; section 5.10.1 says bit 7 is set either way. Which of the two changes mattered
+  was not separated. The timing number suggests the budget did.
+- **Every read finds Avail set and Locked still clear.** In SyncSample mode, the STATUSINT read
+  that starts the lock sees Locked = 0, so the driver waits the 6 µs Data_Lock_Delay (Table 40)
+  on every sample. The `unlocked` counter equals `reads`. Expected, not a fault.
+
+### A reset in the middle of a read — measured, and fixed
+
+The MCU can reset while the IMU is sending (the bus is busy about 45% of the time at
+906.86 Hz), and the IMU is not reset with it. Across repeated resets through EN, **before:** 5
+of 20, then 12 of 40, failed the IMU init. The status line now reports each boot's init step,
+SDA level and bus-clear clocks, and they showed two separate causes:
+
+| Cause | Evidence | Fix | After |
+|---|---|---|---|
+| SDA held low by the IMU mid-byte | every boot that found SDA low failed; ESP-IDF's `i2c_master_bus_reset()` left it low; a hand clear that stopped clocking at the first high SDA still failed 4 of 40 (a 1 data bit is not a release) | nine clocks with SDA released, then a STOP (NXP UM10204 §3.1.16), before the driver takes the pins | released in 1–7 clocks, every time |
+| CTRL9 handshake timing out | STATUSINT never showed CmdDone within 50 reads | bounded by time; `CTRL8.bit7` | 3253 µs measured |
+
+**After: 60 of 60 resets brought the IMU up**, six of them from a stuck bus.
+
+### Memory — measured
+
+Binary 651 KB (58% of the 1.5 MB app partition free). Internal heap free at runtime:
+**52,947 B**, against 182,520 B under the Arduino display sketch. Not yet broken down: this
+firmware adds the ring (14 KB) and two histograms (16 KB) in static DRAM, which does not
+account for it all. The canary build's 21.5 KB DRAM overflow says static DRAM is the tighter
+budget. PSRAM free: 2.08 MB,
+untouched: the fonts are still in flash-mapped rodata (invariant 7 permits PSRAM for them; not
+yet done).
+
+### Not yet checked
+
+- **Screens and swipes on this firmware, by eye.** Touch answers (chip ID 0xB5), and `r`, `n`,
+  `p` and gestures drive `pl_ui`, but nobody has looked at the panel since the flash.
+- The 120 MHz flash of parent §6.3 (not attempted: it needs `SPI_FLASH_HPM_ON` and a flash part
+  that supports it) and `LV_MEMCPY_MEMSET_STD` (an LVGL 8 name; its LVGL 9 equivalent lives in
+  the shared `lv_conf.h`).

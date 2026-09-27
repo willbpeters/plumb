@@ -90,8 +90,13 @@ lock serialises the two. Under the gate the IMU has the bus to itself, which is 
 ## Console (UART, 921600 baud)
 
 Single characters, as in `imu_stream`: `s` start/stop streaming, `b` binary, `c` CSV, `a` arm
-gate, `d` disarm gate, `j` print a jitter report, `?` status. The UI result screen shows the
-bring-up's example result on `r`, and swipes move between screens.
+gate, `o` open gate, `x` cycle the result screens every 100 ms (the jitter test's rendering
+load), `j` print a jitter report, `?` status. The UI result screen shows the bring-up's example
+result on `r`, `n`/`p` step screens, and swipes move between screens. `1` and `d` are
+acknowledged, as the only rate and read path this firmware has; `9` and `f` are refused.
+
+*Changed during the build.* This first read `d` for "disarm gate". `tools/board.py` sends `d` to
+select the direct read path, and `capture.py` has to work unchanged, so the gate is `a`/`o`.
 
 ## Measurements
 
@@ -104,3 +109,33 @@ bring-up's example result on `r`, and swipes move between screens.
   machine port.
 - **Wi-Fi absent:** a build step greps the linker map for `esp_wifi` / `esp_bt` / `wifi_` symbols
   and fails the build if any are present.
+
+## Decisions made in the build
+
+Recorded in the plan (`docs/superpowers/plans/2026-09-27-firmware-skeleton.md`); results in
+`docs/bringup-results.md`, "ESP-IDF firmware skeleton".
+
+- **LVGL's Kconfig is ignored** (`LV_KCONFIG_IGNORE`), so the device compiles LVGL from exactly
+  the `lv_conf.h` the host bench uses, one configuration in both places.
+- **The build contains only what `main` pulls in** (`set(COMPONENTS main)`), so `esp_wifi` and
+  `bt` are not compiled at all. The map check matches radio *archives*; matching symbol names
+  failed on ROM addresses and a clock helper that every build links.
+- **Flash runs at 80 MHz QIO, not the 120 MHz of parent §6.3.** On the S3, 120 MHz needs
+  `SPI_FLASH_HPM_ON` and a flash part that supports it, and the Kconfig help warns of random
+  crashes after a ~20 °C temperature change in some modes. Nothing here depends on flash speed.
+  **This disagrees with parent §6.3 and is left for Will.**
+- **`LV_MEMCPY_MEMSET_STD` (parent §6.3) is an LVGL 8 name.** Its LVGL 9 equivalent belongs in
+  the shared `lv_conf.h`, so it is left for a measured change.
+- **Register facts rev A does not give:** INT2 needs `CTRL1` bit 4, and the CTRL9 handshake
+  takes 3253 µs. Also, a reset in the middle of a read leaves the IMU holding SDA, and nine
+  clocks and a STOP free it. All three are measured in `bringup-results.md`.
+
+## Done-means, as measured
+
+1. **Loss:** 0 of 54,653 in 60 s at rest. — met.
+2. **Jitter:** recorded, animating against armed (the tables in `bringup-results.md`). Rendering
+   pushes read latency past the sample period and, together with streaming, lost 0.72%; the gate
+   removes both. — met.
+3. **Screens and swipes:** not yet checked by eye on this firmware. — **open, needs Will.**
+4. **No radio code linked:** checked on every link, and the check shown to fail a canary. — met.
+5. **Parent §6.2 amended** for data-ready pacing. — met.

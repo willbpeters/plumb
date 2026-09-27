@@ -330,8 +330,26 @@ blending.
 Graphics and sensor acquisition never compete for the same instant, and this is enforced
 structurally:
 
-- **Core 0** — IMU acquisition task. Hardware-timer driven, high priority, writes to a
-  lock-free ring buffer. Nothing else runs on this core during a stroke.
+- **Core 0** — IMU acquisition task. Paced by the IMU's data-ready line, high priority,
+  writes to a lock-free ring buffer. Nothing else runs on this core during a stroke.
+
+  *Amended 2026-09-27.* This previously read "Hardware-timer driven". A timer runs on the
+  ESP32's clock and the IMU on its own, and this unit's IMU runs at 906.86 Hz against a nominal
+  896.8 (§6.4), so a timer at the nominal rate would duplicate or miss about one sample in a
+  hundred. Acquisition is paced by the IMU's own data-ready line instead: DRDY on INT2 →
+  GPIO3, which wakes the task. The part runs in SyncSample mode, whose lock stops a ~500 µs
+  I²C read from being torn by the next sample (datasheet rev A §6.1, §6.3, §13.2). Two
+  register facts that rev A gets wrong or leaves ambiguous are recorded in
+  `docs/bringup-results.md`: INT2 needs `CTRL1` bit 4, which rev A marks reserved, and the
+  CTRL9 handshake needs `CTRL8.bit7`.
+
+  Measured on the firmware skeleton (`firmware/`, 2026-09-27): zero samples lost in 60 s at
+  rest (54,653 samples, 906.93 Hz, counted from the sensor's own sample counter, read by
+  `capture.py` unchanged). With the UI rendering continuously, the median time from DRDY edge
+  to read complete rose from 699 to 926 µs, and its maximum reached 1148 µs, past the 1103 µs
+  sample period. Rendering and streaming together lost 391 of 54,568 samples (0.72%). With
+  the gate below armed, the same load lost none (54,720 samples), with latency p99 707 µs and
+  maximum 820 µs. The rule in the next paragraph is therefore measured, not assumed.
 - **Core 1** — LVGL rendering, UI state, storage writes, power management.
 
 During an armed stroke, the UI renders nothing. The screen displays a result only after
