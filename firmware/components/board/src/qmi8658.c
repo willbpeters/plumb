@@ -31,6 +31,10 @@
 #define RESET_COMMAND 0xB0
 #define RESET_RESULT_OK 0x80
 #define CTRL1_ADDR_AI 0x40
+/* INT2 output enable. Rev A marks CTRL1 bits 4:3 reserved, but with them clear
+ * no DRDY edge ever reached GPIO3 (measured: reads=0, drdy_timeouts climbing).
+ * QMI8658A documentation and SensorLib name bit 4 INT2_EN, bit 3 INT1_EN. */
+#define CTRL1_INT2_EN 0x10
 #define CTRL2_ACCEL_16G_896HZ ((0x03 << 4) | 0x03)
 #define CTRL3_GYRO_256DPS_896HZ ((0x04 << 4) | 0x03)
 #define CTRL5_STROKE_FILTERS 0x10 /* gyro LPF on, mode 00; accel LPF off */
@@ -131,7 +135,7 @@ esp_err_t qmi8658_init(i2c_master_bus_handle_t bus)
      * setting the little-endian unpack was proven under. */
     uint8_t ctrl1 = 0;
     if ((err = read_regs(REG_CTRL1, &ctrl1, 1)) != ESP_OK) return err;
-    if ((err = write_verified(REG_CTRL1, (uint8_t)(ctrl1 | CTRL1_ADDR_AI))) != ESP_OK) return err;
+    if ((err = write_verified(REG_CTRL1, (uint8_t)(ctrl1 | CTRL1_ADDR_AI | CTRL1_INT2_EN))) != ESP_OK) return err;
 
     if ((err = write_verified(REG_CTRL2, CTRL2_ACCEL_16G_896HZ)) != ESP_OK) return err;
     if ((err = write_verified(REG_CTRL3, CTRL3_GYRO_256DPS_896HZ)) != ESP_OK) return err;
