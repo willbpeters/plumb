@@ -156,3 +156,49 @@ def test_invariant_1_face_rotation_cannot_steer_the_transition():
     assert segmentations["fast face"] == segmentations["swing only"], (
         f"face rotation moved the segmentation: {segmentations}"
     )
+
+
+def _radio_check():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "firmware" / "tools" / "check_no_radio.py"
+    spec = importlib.util.spec_from_file_location("check_no_radio", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Excerpts in GNU ld's map format: the archive-member section, then a placed
+# symbol. The radio one is what linking esp_wifi_init() produces.
+_CLEAN_MAP = """\
+Archive member included to satisfy reference by file (symbol)
+
+esp-idf/esp_timer/libesp_timer.a(esp_timer.c.obj)
+                              esp-idf/main/libmain.a(app_main.c.obj) (esp_timer_get_time)
+ .text.esp_timer_get_time
+                0x42001234       0x10 esp-idf/esp_timer/libesp_timer.a(esp_timer.c.obj)
+                0x42001234                esp_timer_get_time
+"""
+
+_RADIO_MAP = _CLEAN_MAP + """\
+esp-idf/esp_wifi/libesp_wifi.a(wifi_init.c.obj)
+                              esp-idf/main/libmain.a(app_main.c.obj) (esp_wifi_init)
+ .text.esp_wifi_init
+                0x42005678       0x40 esp-idf/esp_wifi/libesp_wifi.a(wifi_init.c.obj)
+                0x42005678                esp_wifi_init
+"""
+
+
+def test_invariant_6_map_check_passes_a_clean_map():
+    """CLAUDE.md invariant 6. The check has to pass a real build's map, or it
+    is noise that gets switched off."""
+    assert _radio_check().offending(_CLEAN_MAP) == []
+
+
+def test_invariant_6_map_check_rejects_linked_wifi():
+    """CLAUDE.md invariant 6: Wi-Fi stays compiled out in every build. The
+    check is what makes that a property of the binary rather than a hope."""
+    found = _radio_check().offending(_RADIO_MAP)
+    assert found
+    assert any("esp_wifi" in line for line in found)
