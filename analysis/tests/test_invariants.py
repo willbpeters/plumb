@@ -170,7 +170,11 @@ def _radio_check():
 
 
 # Excerpts in GNU ld's map format: the archive-member section, then a placed
-# symbol. The radio one is what linking esp_wifi_init() produces.
+# symbol. The radio one is what linking esp_wifi_init() produces. The clean one
+# carries two lines from the first real build's map that name Wi-Fi without
+# being radio code: a ROM function's address from the linker script, and the
+# peripheral-clock helper every build links. A check that flags them fails
+# every build and gets switched off.
 _CLEAN_MAP = """\
 Archive member included to satisfy reference by file (symbol)
 
@@ -179,6 +183,8 @@ esp-idf/esp_timer/libesp_timer.a(esp_timer.c.obj)
  .text.esp_timer_get_time
                 0x42001234       0x10 esp-idf/esp_timer/libesp_timer.a(esp_timer.c.obj)
                 0x42001234                esp_timer_get_time
+                0x40005ab4                        wifi_get_macaddr = 0x40005ab4
+  wifi_bt_common_module_enable                      esp-idf/esp_hw_support/libesp_hw_support.a(periph_ctrl.c.obj)
 """
 
 _RADIO_MAP = _CLEAN_MAP + """\
