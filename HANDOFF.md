@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries seven marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries eight marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -257,7 +257,7 @@ Still to do on it, in order:
 > leaves tempo alone), and `StrokeResult.backswing_s / downswing_s / path_travel_m`, which the
 > UI already draws from.
 >
-> **Your call — the track ring's size.** `PL_PIPELINE_TRACK_MAX` = 2720 samples (3.0 s at
+> **Track ring size — DECIDED by Will 2026-09-28: keep 3 s.** `PL_PIPELINE_TRACK_MAX` = 2720 samples (3.0 s at
 > 906.86 Hz). In float **one `pl_pipeline` is 156,640 bytes, 130,560 of them the ring** —
 > internal SRAM, since invariant 7 keeps PSRAM for fonts and images. Sized from the harness:
 > the slowest strokes generated (1.0 s backswing, tempo 1.5) need 2318 samples from onset to
@@ -276,17 +276,27 @@ Still to do on it, in order:
 > **Not in the pipeline, Python or C: impact speed.** §1.2.1 makes it a first-build metric and
 > the UI has a screen for it, but nothing computes it yet. Python first.
 >
+> **Startup rate measurement — done, on the board (2026-09-28).** `acq/rate.c`: least squares
+> of DRDY edge time (`esp_timer`) against the sensor's own sample index over the first 1,024
+> samples after boot; records where the task fell behind are skipped, mispaired edges
+> rejected at 5 robust sigmas. 8 host tests against generated ground truth, including that the
+> reported error is honest (z SD 1.00 over 60 runs). On the board: **906.9314 Hz, 30
+> back-to-back measurements within 1.0 ppm** (SD 0.28 ppm — 8× the fit's own error, because
+> the oscillator wanders smoothly, not because the fit is wrong). **Against the PC's clock the
+> same unit reads 13.4 ppm higher** — the two crystals' difference; it bounds the systematic
+> term, it cannot say which clock is right. 906.86 (09-21) → 906.93 (09-27) → 906.925 cold /
+> 906.931 warm (09-28): the case for measuring rather than storing. Printed at boot and by
+> `?`; `m` re-measures; `stream_sample_rate()` returns it. Spec §6.4 amended, §7.2 points at
+> it. `uv run python -m tools.rate_check --port COM4` repeats the whole check.
+>
 > **Next, in order:**
-> 1. **Measure the sample rate at startup** in the acquisition firmware, from the IMU's
->    counter, with its own uncertainty; hand it to `pl_pipeline_config.sample_rate_hz`.
->    Spec amendment (§6.4 / §7) goes in with this.
-> 2. **Wire `pl_pipeline` into `main`**: acquisition ring → `pl_pipeline_step` on core 0 →
+> 1. **Wire `pl_pipeline` into `main`**, with `sample_rate_hz` from `stream_sample_rate()`: acquisition ring → `pl_pipeline_step` on core 0 →
 >    result to the UI on core 1, gate armed from ADDRESS to DONE (invariant 8). Add `plumb` to
 >    `main`'s REQUIRES — until then **`idf.ps1 build` compiles none of the port**; it has been
 >    cross-compiled by hand with the ESP32-S3 GCC 14.2 at `-Werror`, both precisions.
-> 3. Thresholds on the device are the harness's placeholders until Phase 2 (invariant 5) —
+> 2. Thresholds on the device are the harness's placeholders until Phase 2 (invariant 5) —
 >    they must be passed in from one clearly-labelled place, not scattered.
-> 4. Impact speed, in Python first.
+> 3. Impact speed, in Python first.
 
 > **`pivot.c` done (2026-09-28).** `analysis/tests/test_c_pivot.py`,
 > 9 tests, both precisions, checked to have run rather than skipped:
@@ -366,8 +376,8 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Seven amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
-one new section. The three to §6.4 came from reading the datasheet or measuring the hardware;
+Eight amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+one new section. The four to §6.4 came from reading the datasheet or measuring the hardware;
 the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
 records what the path code has actually done since the pivot estimate went in; the §4.4 one
 records the charger the schematic actually shows; the §6.2 one records data-ready pacing.
@@ -381,6 +391,7 @@ records the charger the schematic actually shows; the §6.2 one records data-rea
 | 7.4 | `v_face = ω × r` | **`r + d`, `d` fitted per stroke and per golfer** | The sensor translates; the stroke rotates about the hands. The code has estimated `d` since `9516b6f` without a spec amendment; recorded 2026-09-25 with the velocity-form fit that replaced the acceleration form. |
 | 4.4 | ETA6096, ≤ 800 mA | **ETA6098, 1 A** (R15 = 160 kΩ) | Read from the Rev3 schematic at display bring-up, as §4.4 asks. 2.5C on the planned 400 mAh cell. Not yet bench-measured. Amended 2026-09-26. |
 | 6.2 | "hardware-timer driven" | **paced by the IMU's DRDY line** | A timer on the ESP32's clock drifts against the IMU's 906.86 Hz and would duplicate or miss ~1 sample in 100. Amended 2026-09-27 with the skeleton's loss and jitter measurements. |
+| 6.4 | 896.8 Hz, used as the rate | **the rate measured at startup** | This unit runs 1.12% fast and moves ~75 ppm between days; a constant goes stale. Measured to ~15 ppm (crystal-bound). Will's decision 2026-09-27, amended 2026-09-28 with the board measurements. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.

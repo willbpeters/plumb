@@ -15,6 +15,7 @@
 
 #include "acq/frame.h"
 #include "acq/jitter.h"
+#include "acq/rate.h"
 #include "acq/ring.h"
 #include "acq/seqcount.h"
 
@@ -114,16 +115,48 @@ static int run_frame(void)
     return 0;
 }
 
+/* capacity, n, n x (index, edge_us, edges). Prints "ok" and the estimate --
+ * hz hz_se rms_us max_us used rejected skipped span_s accepted -- or "none". */
+static int run_rate(void)
+{
+    static acq_rate_point storage[65536];
+    acq_rate r;
+    acq_rate_estimate e;
+    const long long capacity = next();
+    const long long n = next();
+    if (capacity > (long long)(sizeof(storage) / sizeof(storage[0]))) {
+        fprintf(stderr, "acqcheck: capacity too large\n");
+        return 2;
+    }
+    acq_rate_init(&r, storage, (uint32_t)capacity);
+    for (long long i = 0; i < n; i++) {
+        const uint32_t index = (uint32_t)next();
+        const uint32_t edge = (uint32_t)next();
+        const uint8_t edges = (uint8_t)next();
+        acq_rate_add(&r, index, edge, edges);
+    }
+    if (!acq_rate_solve(&r, &e)) {
+        printf("none\n");
+        return 0;
+    }
+    printf("ok %.17g %.17g %.17g %.17g %lu %lu %lu %.17g %lu\n", e.hz, e.hz_se,
+           e.rms_us, e.max_us, (unsigned long)e.used,
+           (unsigned long)e.rejected, (unsigned long)e.skipped, e.span_s,
+           (unsigned long)e.accepted);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: acqcheck hist|seq|ring|frame < numbers\n");
+        fprintf(stderr, "usage: acqcheck hist|seq|ring|frame|rate < numbers\n");
         return 2;
     }
     if (strcmp(argv[1], "hist") == 0) return run_hist();
     if (strcmp(argv[1], "seq") == 0) return run_seq();
     if (strcmp(argv[1], "ring") == 0) return run_ring();
     if (strcmp(argv[1], "frame") == 0) return run_frame();
+    if (strcmp(argv[1], "rate") == 0) return run_rate();
     fprintf(stderr, "acqcheck: unknown mode %s\n", argv[1]);
     return 2;
 }

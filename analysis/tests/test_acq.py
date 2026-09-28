@@ -185,3 +185,137 @@ def test_frames_decode_with_capture_py(acqcheck):
         assert batch.sensor_seq == bool(flags & 2)
         assert batch.drain_micros == micros
         assert batch.samples == samples
+
+
+# -- the startup rate measurement ------------------------------------------
+#
+# Will's decision, 2026-09-27: the firmware measures its own sample rate at
+# startup, because this board's IMU runs 1.12% above nominal and that error
+# scales every integrated angle. acq/rate.c fits the DRDY edge times against
+# the sensor's own sample index. Ground truth here is a generated edge
+# sequence whose period is known because it was put there.
+
+RATE_CAPACITY = 1024
+TRUE_HZ = 906.86
+
+
+def edges(rng, n, hz=TRUE_HZ, jitter_us=0.0, start_us=123_456, lost=0.0,
+          behind=0.0, slips=0.0):
+    """(index, edge_us, edges) as the acquisition task would record them.
+
+    `lost`: fraction of samples never read -- the counter skips them.
+    `behind`: fraction of records where the task fell behind (edges > 1).
+    `slips`: fraction where the edge time belongs to a later sample than
+    the one read -- the pairing error a late read can cause -- modelled as
+    one whole period of extra delay.
+    """
+    period = 1e6 / hz
+    rows = []
+    index = 0
+    while len(rows) < n:
+        t = start_us + index * period + rng.normal(0.0, jitter_us)
+        count = 1
+        if rng.random() < behind:
+            count = 2
+        if rng.random() < slips:
+            t += period
+        if rng.random() >= lost:
+            rows.append((index, int(round(t)) & 0xFFFFFFFF, count))
+        index += 1
+    return rows
+
+
+def rate(exe, rows, capacity=RATE_CAPACITY):
+    numbers = [capacity, len(rows)]
+    for index, edge, count in rows:
+        numbers += [index, edge, count]
+    out = subprocess.run([str(exe), "rate"],
+                         input=" ".join(str(int(v)) for v in numbers),
+                         capture_output=True, text=True, check=True)
+    fields = out.stdout.split()
+    if fields[0] != "ok":
+        return None
+    names = ["hz", "hz_se", "rms_us", "max_us", "used", "rejected", "skipped",
+             "span_s", "accepted"]
+    return dict(zip(names, (float(v) for v in fields[1:])))
+
+
+def test_rate_is_recovered_from_clean_edges(acqcheck):
+    """Integer-microsecond edges and nothing else: the esp_timer's own
+    resolution is the only error."""
+    est = rate(acqcheck, edges(np.random.default_rng(1), 1000))
+    print(f"\n  clean: {est['hz']:.6f} Hz against {TRUE_HZ}, "
+          f"se {est['hz_se']:.2e}, rms {est['rms_us']:.3f} us")
+    assert est["hz"] == pytest.approx(TRUE_HZ, rel=1e-6)
+    assert est["rejected"] == 0 and est["skipped"] == 0
+    assert est["rms_us"] < 0.5
+
+
+def test_rate_standard_error_is_honest(acqcheck):
+    """The reported uncertainty has to describe the real scatter, or the spec
+    amendment would be stating a number nobody measured. 60 independent
+    measurements with 3 us of edge jitter: the errors divided by their own
+    reported standard error should scatter with SD about 1."""
+    z = []
+    for seed in range(60):
+        est = rate(acqcheck, edges(np.random.default_rng(seed), 1000,
+                                   jitter_us=3.0))
+        z.append((est["hz"] - TRUE_HZ) / est["hz_se"])
+    z = np.array(z)
+    print(f"\n  60 runs at 3 us jitter: z mean {z.mean():+.2f}, sd {z.std(ddof=1):.2f}")
+    assert abs(z.mean()) < 0.5
+    assert 0.75 < z.std(ddof=1) < 1.3
+
+
+def test_lost_samples_do_not_bias_the_rate(acqcheck):
+    """Counting records instead of the counter would read 10% loss as a rate
+    10% low. The fit is on the counter's index, so loss only thins it."""
+    est = rate(acqcheck, edges(np.random.default_rng(2), 1000, jitter_us=3.0,
+                               lost=0.10))
+    assert est["hz"] == pytest.approx(TRUE_HZ, abs=4 * est["hz_se"])
+
+
+def test_a_task_that_fell_behind_is_skipped_not_fitted(acqcheck):
+    """edges > 1 means more than one DRDY edge since the previous read, so
+    the stored edge time may not be this sample's. Skipped and counted."""
+    rows = edges(np.random.default_rng(3), 1000, jitter_us=3.0, behind=0.05)
+    est = rate(acqcheck, rows)
+    assert est["skipped"] == sum(1 for _, _, c in rows if c > 1)
+    assert est["hz"] == pytest.approx(TRUE_HZ, abs=4 * est["hz_se"])
+
+
+def test_mispaired_edges_are_rejected(acqcheck):
+    """An edge time a whole period late is ~1100 us off the line against a
+    few us of jitter. Left in, 2% of them would inflate the uncertainty
+    tenfold; the robust rejection takes them out and says how many."""
+    rng = np.random.default_rng(4)
+    rows = edges(rng, 1000, jitter_us=3.0, slips=0.02)
+    est = rate(acqcheck, rows)
+    clean = rate(acqcheck, edges(np.random.default_rng(4), 1000, jitter_us=3.0))
+    print(f"\n  2% mispaired: rejected {est['rejected']:.0f}, "
+          f"max residual kept {est['max_us']:.1f} us, se {est['hz_se']:.2e} "
+          f"against {clean['hz_se']:.2e} clean")
+    assert 10 <= est["rejected"] <= 35
+    assert est["max_us"] < 30
+    assert est["hz"] == pytest.approx(TRUE_HZ, abs=4 * est["hz_se"])
+    assert est["hz_se"] < 2 * clean["hz_se"]
+
+
+def test_the_esp_timer_wrapping_mid_window_changes_nothing(acqcheck):
+    """edge_us is the low 32 bits of esp_timer: it wraps every 71.6 minutes,
+    so a measurement can straddle it."""
+    start = 0xFFFFFFFF - 400_000
+    est = rate(acqcheck, edges(np.random.default_rng(5), 1000, start_us=start))
+    assert est["hz"] == pytest.approx(TRUE_HZ, rel=1e-6)
+
+
+def test_too_few_points_give_no_rate(acqcheck):
+    assert rate(acqcheck, edges(np.random.default_rng(6), 2)) is None
+
+
+def test_the_buffer_stops_at_capacity(acqcheck):
+    """Points past capacity are not taken, and the harness says how many
+    were: the fit covers what it says it covers."""
+    est = rate(acqcheck, edges(np.random.default_rng(7), 300), capacity=100)
+    assert est["accepted"] == 100 and est["used"] == 100
+    assert est["span_s"] == pytest.approx(99 / TRUE_HZ, rel=1e-3)

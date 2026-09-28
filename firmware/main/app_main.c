@@ -11,6 +11,7 @@
  *   a  arm the gate                o      open the gate
  *   x  toggle the UI exercise      j      jitter report, then a new window
  *   r  example result   n / p  next / previous screen      ?  status
+ *   m  measure the IMU's sample rate again (also done at boot)
  *   1, d  acknowledged: the only rate and read path this firmware has
  *   9, f  refused: max rate and the FIFO path are not on this firmware
  */
@@ -60,6 +61,7 @@ static void console(char c)
     case 'a': gate_arm(); uart_io_printf("# gate armed\n"); break;
     case 'o': gate_open(); uart_io_printf("# gate open\n"); break;
     case 'j': stream_jitter_report(); break;
+    case 'm': stream_measure_rate(); uart_io_printf("# measuring sample rate\n"); break;
     case '?': status(); break;
     case 'x':
         if (ui) {
@@ -88,7 +90,7 @@ static void app_task(void *arg)
     }
     stream_init();
     status();
-    uart_io_printf("# ready: s b c a o x j r n p ?\n");
+    uart_io_printf("# ready: s b c a o x j m r n p ?\n");
     for (;;) {
         int c;
         while ((c = uart_io_getc()) >= 0) {

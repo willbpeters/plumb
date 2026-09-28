@@ -912,3 +912,41 @@ grows after boot; a 60 s stream afterwards added nothing. The leading suspect, n
 the touch controller's init on core 1, which starts while the IMU is already running, and whose
 reads have a 10 ms timeout; a controller still waking from reset could hold the bus that long.
 It matters once sleep and wake (§9) put a boot, or a wake, right before a stroke.
+
+---
+
+## Sample rate measured at startup (2026-09-28)
+
+Will's decision of 2026-09-27, implemented: the firmware measures the IMU's rate itself, and the
+pipeline integrates with it (spec §6.4, amended 2026-09-28). `acq/rate.c` fits DRDY edge time
+(`esp_timer`, in the ISR) against the sample index from the sensor's own counter, over the first
+1,024 samples after boot, rejecting mispaired edges at 5 robust sigmas.
+
+**Cold boot, just after flashing:** 906.9249 Hz, 1,023 of 1,024 points kept, residual RMS
+0.40 µs, max 3.84 µs, no samples lost.
+
+**30 back-to-back measurements (`m`), board warm** — `tools/rate_check.py`:
+
+| | |
+|---|---|
+| Mean | **906.9314 Hz** |
+| SD | 2.5×10⁻⁴ Hz (**0.28 ppm**) |
+| Range | 906.9310 – 906.9319 (1.0 ppm) |
+| Fit's own standard error | 3.2×10⁻⁵ Hz, residual RMS 0.33–0.39 µs, 0–2 points rejected per run |
+| Spread / reported error | **8.0** |
+
+The spread is eight times the fit's error, and it is not scatter: the sequence falls smoothly
+from 906.9319 to 906.9310 and climbs back. That is the oscillator wandering, which the fit does
+not model and should not; it is what bounds one measurement, at about a part per million.
+
+**Against an independent clock.** Streaming 60 s (54,540 samples) and fitting the sample index
+against this PC's arrival times: **906.9436 ± 0.0016 Hz, 13.4 ppm above the board's figure.**
+`esp_timer` counts the ESP32-S3's crystal; the PC has its own. 13 ppm is an ordinary
+disagreement between two crystals, and the check bounds their difference without saying which
+is right. So the measurement's systematic uncertainty is **of order 15 ppm**, and nothing on
+the board can shrink it — the crystal is the reference.
+
+**Across days, this unit:** 906.86 (09-21) → 906.93 (09-27) → 906.925 cold, 906.931 warm (09-28).
+About 75 ppm between days and 7 ppm of warm-up. None of it matters to a metric (100 ppm is
+0.001° on a 10° rotation, against 11,200 ppm uncorrected), but every one of those numbers
+would have been a stale constant.

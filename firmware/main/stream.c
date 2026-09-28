@@ -5,6 +5,7 @@
 #include "acq/acq.h"
 #include "acq/frame.h"
 #include "acq/jitter.h"
+#include "acq/rate.h"
 #include "acq/seqcount.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -31,6 +32,16 @@ static bool s_window_mixed;
 static acq_hist *s_wake;
 static acq_hist *s_statusint;
 static acq_hist *s_burst;
+
+/* The sample rate, measured from the first RATE_POINTS samples after boot
+ * (acq/rate.h) and on request. The points live in internal heap only while a
+ * measurement runs: 12 bytes each. */
+#define RATE_POINTS 1024
+static acq_rate s_rate;
+static acq_rate_point *s_rate_points;
+static acq_rate_estimate s_rate_result;
+static bool s_rate_valid;
+static uint32_t s_rate_count;
 
 /* The stream to the host. */
 static bool s_streaming;
@@ -73,6 +84,65 @@ void stream_init(void)
         s_wake = s_statusint = s_burst = NULL;
     }
     window_reset();
+    stream_measure_rate();
+}
+
+static void rate_print(void)
+{
+    if (!s_rate_valid) {
+        uart_io_printf("# sample rate: %s\n",
+                       s_rate_points ? "measuring" : "not measured");
+        return;
+    }
+    const acq_rate_estimate *e = &s_rate_result;
+    uart_io_printf("# sample rate %.4f Hz +/- %.1e (fit, 1 sigma; crystal not included), "
+                   "measurement %lu: %lu points over %.3f s, %lu rejected, %lu skipped, "
+                   "rms %.2f us, max %.2f us\n",
+                   e->hz, e->hz_se, (unsigned long)s_rate_count,
+                   (unsigned long)e->used, e->span_s, (unsigned long)e->rejected,
+                   (unsigned long)e->skipped, e->rms_us, e->max_us);
+}
+
+void stream_measure_rate(void)
+{
+    if (s_rate_points) {
+        return; /* one already running */
+    }
+    s_rate_points = heap_caps_malloc(RATE_POINTS * sizeof(acq_rate_point),
+                                     MALLOC_CAP_INTERNAL);
+    if (!s_rate_points) {
+        uart_io_printf("# sample rate: no memory to measure\n");
+        return;
+    }
+    acq_rate_init(&s_rate, s_rate_points, RATE_POINTS);
+}
+
+static void rate_feed(uint32_t index, const acq_record *r)
+{
+    if (!s_rate_points) {
+        return;
+    }
+    acq_rate_add(&s_rate, index, r->edge_us, r->edges);
+    if (!acq_rate_full(&s_rate)) {
+        return;
+    }
+    acq_rate_estimate e;
+    if (acq_rate_solve(&s_rate, &e)) {
+        s_rate_result = e;
+        s_rate_valid = true;
+        s_rate_count++;
+    }
+    heap_caps_free(s_rate_points);
+    s_rate_points = NULL;
+    rate_print();
+}
+
+bool stream_sample_rate(acq_rate_estimate *out)
+{
+    if (s_rate_valid) {
+        *out = s_rate_result;
+    }
+    return s_rate_valid;
 }
 
 static void flush_frame(void)
@@ -141,6 +211,7 @@ void stream_service(void)
             s_prev_index = index;
             s_prev_edge_us = r.edge_us;
             s_have_prev = true;
+            rate_feed(index, &r);
         }
         if (s_streaming) {
             emit(&r);
@@ -228,6 +299,7 @@ void stream_status(void)
                    (unsigned long)c.reads, (unsigned long)c.read_errors,
                    (unsigned long)c.not_available, (unsigned long)c.unlocked,
                    (unsigned long)c.missed_edges, (unsigned long)c.drdy_timeouts);
+    rate_print();
     if (s_streaming && elapsed > 0) {
         uart_io_printf("# stream: produced=%lu lost=%lu produced_hz=%.2f\n",
                        (unsigned long)produced, (unsigned long)s_stream.lost,

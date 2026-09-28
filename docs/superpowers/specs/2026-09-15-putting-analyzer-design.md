@@ -402,6 +402,35 @@ resolution per buffer, double-buffered, is followed.
   rate runs only during the ~1.5 s a stroke is being measured. If the §4.3 power
   budget or the ≥500-strokes-per-charge target in §3 later proves tight, 448.4 Hz
   is a one-constant change back.
+- **The nominal rate is the setting, not the rate. The firmware measures the real rate at
+  startup, and the pipeline integrates with the measured value.**
+
+  *Amended 2026-09-28.* The QMI8658's ODR comes from its own
+  MEMS oscillator. This unit runs **1.12% fast** (906.86–906.94 Hz against 896.8), and a rate
+  error is a scale error in every integrated angle that no filtering removes. It is a property
+  of the part, not the part number, so no shared constant can carry it; a per-unit constant
+  was the alternative and was rejected (Will, 2026-09-27) because the rate also moves:
+
+  | Measured on this unit | Rate |
+  |---|---|
+  | 2026-09-21, imu_stream, 20–60 s captures | 906.86 Hz ± 0.01 |
+  | 2026-09-27, product firmware, 60 s | 906.93 Hz |
+  | 2026-09-28, cold boot | 906.9249 Hz |
+  | 2026-09-28, 30 back-to-back startup measurements, warm | 906.9314 Hz, SD 0.28 ppm, range 1.0 ppm |
+
+  About 75 ppm between days and 7 ppm of warm-up — each negligible against the 11,200 ppm
+  being corrected (100 ppm is 0.001° on a 10° rotation), but proof a stored constant goes
+  stale.
+
+  *How* (`firmware/components/acq/src/rate.c`): a least-squares line through (sample index
+  from the sensor's own counter, DRDY edge time from `esp_timer`) over the first 1,024 samples
+  after boot (~1.13 s), with mispaired edges skipped or rejected. Its statistical error is
+  ~3×10⁻⁵ Hz; the measurement is bounded instead by the oscillator's own wander (1 ppm within
+  a session) and by the **ESP32-S3 crystal `esp_timer` counts against, which it cannot see
+  from inside**. Timed against a PC's clock instead, the same unit read 13.4 ppm higher — two
+  crystals disagreeing by an ordinary amount; that check bounds their difference and cannot
+  say which is right. Total rate uncertainty: **of order 15 ppm**, three orders of magnitude
+  inside what it replaces. Re-checked with `analysis/tools/rate_check.py`.
 - Full-scale ranges: gyro **±256 dps**, accelerometer ±16 g.
 
   *Amended 2026-09-21.* This previously read ±250 dps, which the QMI8658 cannot
@@ -492,7 +521,8 @@ reintroduce the putter-type priors prohibited in §2.1.
 ### 7.2 Orientation estimation
 
 Orientation is obtained by integrating bias-corrected angular velocity `(ω − b)` from the
-address attitude, which is itself initialized from `g₀`.
+address attitude, which is itself initialized from `g₀`. The integration step is the reciprocal
+of the rate **measured at startup**, not of the nominal ODR (§6.4, amended 2026-09-28).
 
 **Accelerometer correction is heavily down-weighted during the stroke.** This is the single
 most important implementation detail in the pipeline. A stock Madgwick or Mahony filter

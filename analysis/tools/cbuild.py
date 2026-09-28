@@ -28,7 +28,7 @@ SOURCES = [HARNESS / "portcheck.c", COMPONENT / "src" / "quat.c",
 ACQ = REPO / "firmware" / "components" / "acq"
 ACQ_SOURCES = [HARNESS / "acqcheck.c",
                *(ACQ / "src" / f"{name}.c"
-                 for name in ("ring", "seqcount", "jitter", "frame"))]
+                 for name in ("ring", "seqcount", "jitter", "frame", "rate"))]
 LVGL = REPO / "firmware" / "third_party" / "lvgl"
 UI = REPO / "firmware" / "components" / "plumb_ui"
 
