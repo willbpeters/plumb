@@ -231,6 +231,35 @@ Still to do on it, in order:
 **1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
 the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
 
+> **IN PROGRESS (2026-09-27, branch `c-port-pivot`, WIP commit — tests RED on purpose).**
+> Written: `analysis/tests/test_c_pivot.py` (test first), `plumb/pivot.h`, `src/pivot.c`
+> (running sums in the Python's order; Jacobi 3×3 eigensolver standing in for `eigh`), and
+> `pivot.c` registered in the component `CMakeLists.txt` and `cbuild.py`. The test fails
+> with `unknown op: pivreset` — expected; the harness side is not written yet.
+>
+> Resume here, in order:
+> 1. `firmware/test/portcheck.c`: `#include "plumb/pivot.h"` and `<stdlib.h>`, raise
+>    `LINE_MAX_CHARS` to 1024 (`pivupdate` carries 15 numbers), add a `parse_reals` helper
+>    (strtod loop) and a `print_solution` helper (prints `0` for no solution, else
+>    `1 d0 d1 d2 rank residual_fraction samples`). Ops, matching the test file:
+>    `pivreset dt`, `pivnoise c0..c8 samples`, `pivupdate w0..w2 a0..a2 R0..R8`,
+>    `pivnormal` (prints ata[9] atb[3] btb samples noise[9] noise_variance = 24 numbers),
+>    `pivsolve`, `calreset`, `calfold` (folds the current estimator), `calsolve`.
+> 2. `cd analysis; uv run pytest tests/test_c_pivot.py tests/test_c_port.py -q -s` — both
+>    precisions; confirm they RAN, not skipped. If normal equations don't match to 1e-12,
+>    suspect NumPy's `@` going through BLAS (possibly FMA) before suspecting the C.
+> 3. Replace the PORT NOTE in `pivot.py`: **measured 2026-09-27** with NumPy float32 on the
+>    pipeline's own pivot inputs (12 strokes: 3 putters × lie 5/20 × clean/noisy): running
+>    sums cost ≤0.17 mm of offset on the arced putter, Welford ≤0.10 mm, the other putters
+>    0.000 mm — against a 0.55 m offset. Welford is not worth departing from the proven
+>    arithmetic; the port keeps running sums. Update with the real C single-precision number.
+> 4. Full suite, then commit.
+>
+> **Will's decision, 2026-09-27: the firmware measures its own sample rate at startup** from
+> the IMU's counter (next task 2 below is settled). `pipeline.c` takes dt from that
+> measurement, not from `SAMPLE_RATE_HZ`. Needs a spec amendment (§6.4 / §7) when
+> `pipeline.c` lands, with the startup measurement's own uncertainty stated.
+
 ```
 cd analysis; uv run pytest tests/test_c_port.py -q -s
 ```
@@ -375,7 +404,8 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
   charger set to **1 A** (ETA6098, R15 = 160 kΩ), which is 2.5C on the spec's 400 mAh cell.
   Fit at least 1000 mAh, or change R15; confirm the board is Rev3 from its silkscreen first.
   Spec §4.4 amended 2026-09-26; details in `docs/bringup-results.md`.
-- **The 906.86 Hz decision.** See next task 2.
+- ~~**The 906.86 Hz decision.**~~ **Decided 2026-09-27:** measure the rate at startup. See
+  next task 1.
 
 **Resolved:** the blade putter's grip has an **open butt cap**, so the §5.1 barbed-taper base
 works as specified. No step-drilling needed.

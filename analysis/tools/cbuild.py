@@ -23,7 +23,8 @@ REPO = Path(__file__).resolve().parents[2]
 COMPONENT = REPO / "firmware" / "components" / "plumb"
 HARNESS = REPO / "firmware" / "test"
 
-SOURCES = [HARNESS / "portcheck.c", COMPONENT / "src" / "quat.c"]
+SOURCES = [HARNESS / "portcheck.c", COMPONENT / "src" / "quat.c",
+           COMPONENT / "src" / "pivot.c"]
 ACQ = REPO / "firmware" / "components" / "acq"
 ACQ_SOURCES = [HARNESS / "acqcheck.c",
                *(ACQ / "src" / f"{name}.c"
