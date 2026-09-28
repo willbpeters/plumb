@@ -228,10 +228,67 @@ Still to do on it, in order:
   rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
   asks for it; not attempted, reasons in the skeleton spec).
 
-**1. Continue the C port.** `quat.c` and `pivot.c` are done. Remaining: `pipeline.c` — the
-state machine, which is the bulk.
+**1. The C port is complete; wire it into the firmware.** `quat.c`, `pivot.c` and
+`pipeline.c` all done, all verified against the Python and against ground truth (branch
+`c-port-pivot`). What is left is the firmware around it — see "Next, in order" below.
 
-> **`pivot.c` done (2026-09-28, branch `c-port-pivot`).** `analysis/tests/test_c_pivot.py`,
+> **`pipeline.c` done (2026-09-28).** `analysis/tests/test_c_pipeline.py`, 10 tests. The C is
+> fed the simulator's int16 counts and compared at every stage over 14 strokes (three putters,
+> lie 5/20, two face angles, clean and noisy, two tempos), plus a calibrated session, an
+> accelerometer calibration, and the 906.86 Hz rate:
+>
+> | | double vs NumPy | float vs NumPy |
+> |---|---|---|
+> | bias, g0, every stroke boundary, attitude at impact | **0 exactly** | no boundary moved |
+> | face angle | **0 exactly** | 3.3×10⁻⁵° |
+> | tempo ratio | **0 exactly** | 8.7×10⁻⁸ |
+> | arc, travel | 3×10⁻¹⁵ m | 0.035%, 0.006% |
+> | path direction | identical | identical |
+>
+> This answers what `real.h` left open — rates formed in float and everything the pipeline
+> adds on top of the integrator. **Single precision costs nothing measurable**; the
+> precision call is still yours, but the evidence is now whole-pipeline.
+>
+> The arc's 3×10⁻¹⁵ is the only place the C departs from the Python on purpose: it sums
+> the track from the window start, because it keeps a ring rather than the whole list.
+>
+> Also added to the Python first, tests against ground truth: `Pipeline(sample_rate_hz=)`
+> (your 2026-09-27 decision; a wrong rate scales face angle by exactly the rate ratio and
+> leaves tempo alone), and `StrokeResult.backswing_s / downswing_s / path_travel_m`, which the
+> UI already draws from.
+>
+> **Your call — the track ring's size.** `PL_PIPELINE_TRACK_MAX` = 2720 samples (3.0 s at
+> 906.86 Hz). In float **one `pl_pipeline` is 156,640 bytes, 130,560 of them the ring** —
+> internal SRAM, since invariant 7 keeps PSRAM for fonts and images. Sized from the harness:
+> the slowest strokes generated (1.0 s backswing, tempo 1.5) need 2318 samples from onset to
+> DONE. A stroke that outruns the ring reports **path unavailable**; face angle and tempo
+> never touch it (tested). Reductions if SRAM is tight: store the ground-plane projection only
+> (8 floats a sample, not 12 — a Python change first), or assume the pivot is on the shaft
+> axis (collapses the matrix to a vector, at the cost of an assumption). Real stroke lengths
+> come from the Phase 2 corpus; the synthetic generator's are a guess.
+>
+> **Other behaviour the Python did not need:** an impact spike longer than
+> `PL_PIPELINE_IMPACT_MAX` (64 samples, ~70 ms — a putt's is ~4) reports face angle
+> unavailable but keeps tempo; a stillness window that does not fit its ring is refused at
+> init rather than shortened. No threshold has a value anywhere in the C (invariant 5); they
+> arrive in `pl_pipeline_config`.
+>
+> **Not in the pipeline, Python or C: impact speed.** §1.2.1 makes it a first-build metric and
+> the UI has a screen for it, but nothing computes it yet. Python first.
+>
+> **Next, in order:**
+> 1. **Measure the sample rate at startup** in the acquisition firmware, from the IMU's
+>    counter, with its own uncertainty; hand it to `pl_pipeline_config.sample_rate_hz`.
+>    Spec amendment (§6.4 / §7) goes in with this.
+> 2. **Wire `pl_pipeline` into `main`**: acquisition ring → `pl_pipeline_step` on core 0 →
+>    result to the UI on core 1, gate armed from ADDRESS to DONE (invariant 8). Add `plumb` to
+>    `main`'s REQUIRES — until then **`idf.ps1 build` compiles none of the port**; it has been
+>    cross-compiled by hand with the ESP32-S3 GCC 14.2 at `-Werror`, both precisions.
+> 3. Thresholds on the device are the harness's placeholders until Phase 2 (invariant 5) —
+>    they must be passed in from one clearly-labelled place, not scattered.
+> 4. Impact speed, in Python first.
+
+> **`pivot.c` done (2026-09-28).** `analysis/tests/test_c_pivot.py`,
 > 9 tests, both precisions, checked to have run rather than skipped:
 >
 > | | double | float |
@@ -244,11 +301,7 @@ state machine, which is the bulk.
 > Plus ground truth on the rank-deficient single-axis swing, the straight putter's
 > noise-only direction, and the no-estimate cases. The solve uses Jacobi rotations in place
 > of LAPACK's `eigh`, so it is compared on offset, rank and residual rather than bit for bit.
-> Cross-compiled clean with the ESP32-S3 GCC 14.2 at `-Werror` in both precisions — by hand:
-> **nothing in `main` requires the `plumb` component yet, so `idf.ps1 build` compiles
-> neither `quat.c` nor `pivot.c`.** That changes when `pipeline.c` is wired in.
->
-> **Welford was not adopted.** The old port note asked for it; measured in NumPy float32
+>> **Welford was not adopted.** The old port note asked for it; measured in NumPy float32
 > first, running sums cost ≤ 0.17 mm of offset and Welford ≤ 0.10 mm. The port keeps the
 > Python's arithmetic. `pivot.py`'s port note now says so.
 >
@@ -260,10 +313,6 @@ state machine, which is the bulk.
 > that double kept, once in twelve strokes. The offset moved 0.53 mm. Nothing consumes rank
 > except reporting. A basis-free test would judge the degenerate plane as a whole.
 >
-> **Will's decision, 2026-09-27: the firmware measures its own sample rate at startup** from
-> the IMU's counter (next task 2 below is settled). `pipeline.c` takes dt from that
-> measurement, not from `SAMPLE_RATE_HZ`. Needs a spec amendment (§6.4 / §7) when
-> `pipeline.c` lands, with the startup measurement's own uncertainty stated.
 
 ```
 cd analysis; uv run pytest tests/test_c_port.py -q -s
@@ -281,16 +330,16 @@ Two things to know before continuing:
   `real.h`. About one ulp per operation, and **at most 4.0×10⁻⁵° of face angle across a whole
   replayed stroke** — ~25,000× inside the 1.0° target — with no growth over a 30 s address.
   Doubles are software-emulated on the ESP32-S3 at 896.8 Hz, so single is the likely choice;
-  it is still Will's call. Rates formed in float and everything `pipeline.c` adds are not yet
-  covered: `test_single_precision_across_a_whole_stroke` replays the pipeline's own integrate
-  calls through the harness, and extends to that when it exists.
+  it is still Will's call. **Now measured on the whole pipeline too** (2026-09-28, above):
+  3.3×10⁻⁵° of face angle, no stroke boundary moved.
 - **The build lives in `analysis/tools/cbuild.py`, not in a shell script.** It discovers the
   toolchain itself — cc/gcc/clang, else MSVC, which is driven directly because `vcvars64.bat`
   hangs in Git Bash here. It was a shell script for about an hour, and in that hour running
   the suite from PowerShell skipped all ten cases silently and read as a pass, because `sh`
   was not on PATH. Verify the port test actually RAN, not merely that it was green.
 
-**2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
+**2. The 906.86 Hz decision — DECIDED 2026-09-27: measure at startup** (next task 1, step 1).
+The reasoning that led there, kept for the record: a 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
 deliberately left at nominal 896.8, because 906.86 is *this board's* oscillator and baking one
 unit's calibration into a shared constant trades a known error for a hidden one. The real

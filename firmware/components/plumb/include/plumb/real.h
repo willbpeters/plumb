@@ -68,6 +68,7 @@ typedef float pl_real;
 #define PL_SIN(x)         sinf(x)
 #define PL_COS(x)         cosf(x)
 #define PL_FABS(x)        fabsf(x)
+#define PL_FLOOR(x)       floorf(x)
 #define PL_REAL_NAME      "float"
 #else
 typedef double pl_real;
@@ -76,6 +77,7 @@ typedef double pl_real;
 #define PL_SIN(x)         sin(x)
 #define PL_COS(x)         cos(x)
 #define PL_FABS(x)        fabs(x)
+#define PL_FLOOR(x)       floor(x)
 #define PL_REAL_NAME      "double"
 #endif
 

@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "plumb/pipeline.h"
 #include "plumb/pivot.h"
 #include "plumb/quat.h"
 
@@ -70,6 +71,24 @@ static void print_solution(int solved, const pl_pivot_solution *solution)
     row[5] = solution->residual_fraction;
     row[6] = (pl_real)solution->samples;
     print_reals(row, 7);
+}
+
+/* Static: the track ring makes it ~260 KB in double, too big for a stack. */
+static pl_pipeline pipeline;
+
+static void print_stroke(const pl_stroke_result *r)
+{
+    pl_real row[9];
+    row[0] = (pl_real)r->face_valid;
+    row[1] = r->face_angle_deg;
+    row[2] = r->backswing_s;
+    row[3] = r->downswing_s;
+    row[4] = r->tempo_ratio;
+    row[5] = (pl_real)r->path_valid;
+    row[6] = r->path_arc_m;
+    row[7] = r->path_travel_m;
+    row[8] = (pl_real)r->path_direction;
+    print_reals(row, 9);
 }
 
 int main(void)
@@ -258,6 +277,73 @@ int main(void)
             pl_pivot_solution solution;
             print_solution(pl_pivot_calibration_solve(&calibration, &solution),
                            &solution);
+
+        } else if (strcmp(op, "pipinit") == 0) {
+            /* rate, gyro and accel scale, lever arm, the thirteen thresholds
+             * in declaration order, accel offset[3] and gain[3], and whether
+             * to fold into the session calibration. */
+            pl_real values[24];
+            pl_pipeline_config cfg;
+            pl_thresholds *th = &cfg.th;
+            if (!parse_reals(line, values, 24)) {
+                fprintf(stderr, "bad pipinit: %s", line);
+                return 1;
+            }
+            cfg.sample_rate_hz = values[0];
+            cfg.gyro_rad_per_count = values[1];
+            cfg.accel_mps2_per_count = values[2];
+            cfg.lever_arm_m = values[3];
+            th->stillness_window_s = values[4];
+            th->stillness_gyro_std_rad = values[5];
+            th->onset_gyro_rad = values[6];
+            th->backswing_gyro_rad = values[7];
+            th->backswing_hold_s = values[8];
+            th->transition_gyro_rad = values[9];
+            th->impact_accel_mps2 = values[10];
+            th->followthrough_gyro_rad = values[11];
+            th->followthrough_hold_s = values[12];
+            th->accel_gain_static = values[13];
+            th->accel_gain_stroke = values[14];
+            th->path_straight_arc_m = values[15];
+            th->pivot_max_residual = values[16];
+            for (i = 0; i < 3; i++) {
+                cfg.accel_offset_mps2[i] = values[17 + i];
+                cfg.accel_gain[i] = values[20 + i];
+            }
+            printf("%d\n", pl_pipeline_init(&pipeline, &cfg,
+                                            values[23] != 0 ? &calibration : NULL));
+
+        } else if (strcmp(op, "pipstep") == 0) {
+            pl_real values[6];
+            int16_t gyro[3], accel[3];
+            pl_stroke_result result;
+            if (!parse_reals(line, values, 6)) {
+                fprintf(stderr, "bad pipstep: %s", line);
+                return 1;
+            }
+            for (i = 0; i < 3; i++) {
+                gyro[i] = (int16_t)values[i];
+                accel[i] = (int16_t)values[3 + i];
+            }
+            if (pl_pipeline_step(&pipeline, gyro, accel, &result)) {
+                print_stroke(&result);
+            }
+
+        } else if (strcmp(op, "pipstate") == 0) {
+            pl_real row[17];
+            row[0] = (pl_real)pipeline.state;
+            row[1] = (pl_real)pipeline.n;
+            for (i = 0; i < 3; i++) {
+                row[2 + i] = pipeline.bias[i];
+                row[5 + i] = pipeline.g0[i];
+            }
+            row[8] = pipeline.i_backswing_start;
+            row[9] = pipeline.i_transition;
+            row[10] = (pl_real)pipeline.i_impact;
+            row[11] = (pl_real)pipeline.i_motion_end;
+            for (i = 0; i < 4; i++) { row[12 + i] = pipeline.q_impact[i]; }
+            row[16] = (pl_real)pipeline.track_first_n;
+            print_reals(row, 17);
 
         } else if (strcmp(op, "precision") == 0) {
             printf("%s\n", PL_REAL_NAME);

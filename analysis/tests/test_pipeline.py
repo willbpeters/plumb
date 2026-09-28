@@ -496,3 +496,48 @@ def test_accelerometer_bias_needs_the_device_calibration():
           f"biased and calibrated {calibrated:.3f}")
     assert abs(raw - clean) > 0.1, "the bias should visibly move the arc"
     assert calibrated == pytest.approx(clean, abs=0.005)
+
+
+def test_result_reports_both_phases_and_the_travel():
+    """The screens need the phases, not only their ratio (the tempo bars are
+    drawn to length), and the path drawing is scaled by the travel. All three
+    were computed and thrown away; now they are reported, against the truth
+    the generator produced."""
+    for tempo in (1.5, 2.0, 3.0):
+        traj, pipe, result = run_stroke(StrokeParams(tempo_ratio=tempo))
+        dt = 1.0 / SAMPLE_RATE_HZ
+        true_backswing = (traj.transition_index - traj.address_end_index) * dt
+        true_downswing = (traj.impact_index - traj.transition_index) * dt
+        # One sample either way: the phases' own boundaries are sample-grid
+        # instants in the generator and back-extrapolated ones in the pipeline.
+        assert result.backswing_s == pytest.approx(true_backswing, abs=2 * dt)
+        assert result.downswing_s == pytest.approx(true_downswing, abs=2 * dt)
+        assert result.tempo_ratio == result.backswing_s / result.downswing_s
+        _, travel_true = true_face_path(traj, pipe)
+        assert result.path_travel_m == pytest.approx(travel_true, rel=0.05)
+
+
+def test_the_sample_rate_is_the_callers_and_it_matters():
+    """Will's decision, 2026-09-27: the firmware measures its own rate at
+    startup rather than assuming 896.8 Hz, because this board runs at
+    906.86. So the pipeline takes the rate it is given.
+
+    Why it matters, against ground truth: data taken at one rate and
+    integrated at another scales every integrated angle by the ratio. Tempo
+    is a ratio of durations and does not move; face angle does, by exactly
+    the 1.12% this board's oscillator is off nominal."""
+    traj = generate(StrokeParams(face_angle_at_impact_deg=5.0))
+    out = simulate(traj, SensorParams(), seed=1)
+    results = {}
+    for rate in (SAMPLE_RATE_HZ, 906.86):
+        pipe = Pipeline(Thresholds(), out.full_scale, sample_rate_hz=rate)
+        assert pipe.dt == 1.0 / rate
+        result = None
+        for i in range(len(traj.time)):
+            result = pipe.step(out.gyro_counts[i], out.accel_counts[i]) or result
+        results[rate] = result
+    right, wrong = results[SAMPLE_RATE_HZ], results[906.86]
+    assert right.face_angle_deg == pytest.approx(5.0, abs=0.01)
+    assert wrong.face_angle_deg == pytest.approx(
+        right.face_angle_deg * SAMPLE_RATE_HZ / 906.86, rel=0.002)
+    assert wrong.tempo_ratio == pytest.approx(right.tempo_ratio, abs=0.01)

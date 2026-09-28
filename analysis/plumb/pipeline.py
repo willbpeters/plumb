@@ -65,13 +65,20 @@ class StrokeResult:
     tempo_ratio: float
     path_arc_m: float
     path_direction: str
+    # The phases themselves, not only their ratio (the tempo screen draws them
+    # to length), and the stroke's net ground-plane travel (which scales the
+    # path drawing). Both computed anyway; reported so the device can show them.
+    backswing_s: float = 0.0
+    downswing_s: float = 0.0
+    path_travel_m: float = 0.0
 
 
 class Pipeline:
     def __init__(self, thresholds: Thresholds, full_scale: FullScale,
                  lever_arm_m: float = 0.85,
                  pivot_calibration: PivotCalibration | None = None,
-                 accel_calibration: AccelCalibration | None = None):
+                 accel_calibration: AccelCalibration | None = None,
+                 sample_rate_hz: float = SAMPLE_RATE_HZ):
         self.th = thresholds
         self.fs = full_scale
         # The device calibration, parent spec 8.1. Optional so the harness can
@@ -79,7 +86,12 @@ class Pipeline:
         # hardware: see plumb/calibration.py for what an uncorrected bias does.
         self.accel_cal = accel_calibration or AccelCalibration.identity()
         self.lever_arm = lever_arm_m
-        self.dt = 1.0 / SAMPLE_RATE_HZ
+        # The rate the samples were actually taken at, which is the caller's
+        # to know. Will's decision, 2026-09-27: the firmware measures it at
+        # startup, because this board runs 1.12% above the nominal 896.8 Hz and
+        # that error scales every integrated angle
+        # (test_the_sample_rate_is_the_callers_and_it_matters).
+        self.dt = 1.0 / sample_rate_hz
 
         self.state = State.IDLE
         self.visited: list[State] = [State.IDLE]
@@ -514,13 +526,17 @@ class Pipeline:
         # 0.55 m pivot offset that is 1.4 m, and 0.85/1.4 = 0.607 is precisely
         # the arc shortfall this replaces.
         #
-        # PORT NOTE: the 3x3 per sample costs 48 KB over a 1.5 s stroke at
-        # 896.8 Hz, against 16 KB for the track alone. That is affordable on
-        # this part but it is not free, and invariant 7 already has claims on
-        # internal SRAM. If it becomes tight, the reduction is to assume the
-        # pivot lies on the shaft axis, which collapses the matrix back to a
-        # vector -- at the cost of an assumption about where the hands are that
-        # the measurement currently does not need.
+        # PORT NOTE, now measured on the port (firmware/components/plumb/src/
+        # pipeline.c, 2026-09-28): this list is a ring there, 48 bytes a
+        # sample in single precision, 2720 samples (3.0 s at 906.86 Hz) =
+        # 130,560 bytes of a 156,640-byte pipeline. Sized from the harness:
+        # the slowest strokes generated need 2318 samples from onset to DONE.
+        # A stroke that outruns it reports path unavailable, never a partial
+        # one. The size is Will's call. Reductions, in order of cost: store
+        # the ground-plane projection only (g0 is known at address; 8 floats a
+        # sample, not 12), or assume the pivot lies on the shaft axis, which
+        # collapses the matrix to a vector -- at the cost of an assumption
+        # about where the hands are that the measurement does not need now.
         if self._pivot_calibration is not None:
             self._pivot_calibration.fold(self._pivot)
             self._pivot_solution = self._pivot_calibration.solve()
@@ -596,4 +612,7 @@ class Pipeline:
             tempo_ratio=backswing / downswing,
             path_arc_m=arc,
             path_direction=direction,
+            backswing_s=backswing,
+            downswing_s=downswing,
+            path_travel_m=distance,
         )
