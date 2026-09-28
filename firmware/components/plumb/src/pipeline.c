@@ -83,6 +83,11 @@ int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
     p->impact_start_n = 0;
     p->impact_length = 0;
     p->impact_track_n = 0;
+    for (i = 0; i < 3; i++) {
+        p->pre_impact_omega[i] = (pl_real)0.0;
+    }
+    p->has_pre_impact_omega = 0;
+    p->i_speed_n = 0;
     pl_quat_identity(p->q_impact);
     p->has_q_impact = 0;
 
@@ -344,7 +349,16 @@ static void step_downswing(pl_pipeline *p, const pl_real accel[3])
         /* The Python's len(face_track): the track holds this sample already. */
         p->impact_track_n = p->n + 1;
         enter(p, PL_STATE_IMPACT);
+        return;
     }
+    /* Overwritten by every sample that is not the spike's first, so on the
+     * trigger it holds the last one before it: the speed the face arrived
+     * with, before the gyro reads the collision too. */
+    for (i = 0; i < 3; i++) {
+        p->pre_impact_omega[i] = p->prev_omega[i];
+    }
+    p->has_pre_impact_omega = 1;
+    p->i_speed_n = p->n;
 }
 
 /* The middle of the above-threshold run. Attitudes are stored only while the
@@ -520,6 +534,28 @@ static void compute_path(pl_pipeline *p, pl_stroke_result *out)
     }
 }
 
+/* |omega x (d + r)|: the face is a point of a rigid body rotating about the
+ * pivot, and d + r runs from the pivot to it. Rotation preserves length, so
+ * the body frame is enough. Runs after compute_path, which solved the pivot. */
+static void compute_speed(const pl_pipeline *p, pl_stroke_result *out)
+{
+    pl_real face[3], v[3];
+    const pl_real *d = p->pivot_solution.offset;
+
+    out->speed_valid = 0;
+    out->impact_speed_mps = (pl_real)0.0;
+    if (!p->has_pre_impact_omega || !p->has_pivot_solution
+        || p->pivot_solution.residual_fraction > p->cfg.th.pivot_max_residual) {
+        return;
+    }
+    face[0] = (pl_real)0.0 + d[0];
+    face[1] = (pl_real)0.0 + d[1];
+    face[2] = -p->cfg.lever_arm_m + d[2];
+    cross(p->pre_impact_omega, face, v);
+    out->impact_speed_mps = norm3(v);
+    out->speed_valid = 1;
+}
+
 static void compute(pl_pipeline *p, pl_stroke_result *out)
 {
     const pl_real backswing = (p->i_transition - p->i_backswing_start) * p->dt;
@@ -536,6 +572,7 @@ static void compute(pl_pipeline *p, pl_stroke_result *out)
         : (pl_real)0.0;
 
     compute_path(p, out);
+    compute_speed(p, out);
 }
 
 static int step_followthrough(pl_pipeline *p, const pl_real omega[3],

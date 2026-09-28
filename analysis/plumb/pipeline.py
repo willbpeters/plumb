@@ -71,6 +71,9 @@ class StrokeResult:
     backswing_s: float = 0.0
     downswing_s: float = 0.0
     path_travel_m: float = 0.0
+    # Clubhead speed arriving at the ball (parent spec 1.2.1). None when the
+    # pivot is not known: see _impact_speed.
+    impact_speed_mps: float | None = None
 
 
 class Pipeline:
@@ -120,6 +123,9 @@ class Pipeline:
         self._backswing_direction = None
         self._prev_magnitude = None
         self._impact_window: list[tuple[int, np.ndarray]] = []
+        # The last downswing sample before the impact spike, for impact speed.
+        self._pre_impact_omega = None
+        self.i_speed_n = None
 
         self._face_track: list[np.ndarray] = []
         # Per-sample R(q) [omega]x dt. The extra face displacement from
@@ -441,6 +447,13 @@ class Pipeline:
             self._impact_window = [(self.n, self.q.copy())]
             self._impact_track_index = len(self._face_track)
             self._enter(State.IMPACT)
+            return
+        # Every sample that is NOT the spike's first overwrites this, so on
+        # the trigger it holds the last one before it. From the spike on, the
+        # gyro reads the collision as well as the swing; this is the speed the
+        # face arrived with.
+        self._pre_impact_omega = omega - self.bias
+        self.i_speed_n = self.n
 
     def _step_impact(self, omega, accel) -> None:
         """Take the impact instant as the MIDDLE of the acceleration spike.
@@ -503,6 +516,26 @@ class Pipeline:
         measurement rather than by a stored constant (parent spec 7.3).
         """
         return quat.twist_angle(self.q_impact, self.g0)
+
+    def _impact_speed(self) -> float | None:
+        """Face speed as it reached the ball: |omega x (d + r)|.
+
+        The face is a point of a rigid body rotating about the pivot, and
+        d + r runs from the pivot to it -- d from the pivot to the sensor (the
+        fit path already makes), r from the sensor to the face. Rotation does
+        not change a vector's length, so the body frame is enough.
+
+        Needs the pivot. Without it the radius is the lever arm alone, 0.85 m
+        against ~1.4 m, and the number would be 39% low with nothing to say
+        so. Unavailable is the honest answer (the same reason pivot.py returns
+        None rather than a small offset).
+        """
+        solution = self._pivot_solution
+        if (self._pre_impact_omega is None or solution is None
+                or solution.residual_fraction > self.th.pivot_max_residual):
+            return None
+        face = np.array([0.0, 0.0, -self.lever_arm]) + solution.offset
+        return float(np.linalg.norm(np.cross(self._pre_impact_omega, face)))
 
     def _compute(self) -> StrokeResult:
         backswing = (self.i_transition - self.i_backswing_start) * self.dt
@@ -608,6 +641,7 @@ class Pipeline:
                 direction = "in-to-out" if delta > 0 else "out-to-in"
 
         return StrokeResult(
+            impact_speed_mps=self._impact_speed(),
             face_angle_deg=np.degrees(self._face_angle_at_impact()),
             tempo_ratio=backswing / downswing,
             path_arc_m=arc,

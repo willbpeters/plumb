@@ -541,3 +541,78 @@ def test_the_sample_rate_is_the_callers_and_it_matters():
     assert wrong.face_angle_deg == pytest.approx(
         right.face_angle_deg * SAMPLE_RATE_HZ / 906.86, rel=0.002)
     assert wrong.tempo_ratio == pytest.approx(right.tempo_ratio, abs=0.01)
+
+
+def true_face_speed(traj, index):
+    """The face's real speed at a sample, from the generator's own rate and
+    geometry: a rigid rotation about the pivot, face at pivot_offset +
+    lever_arm below it along the shaft. Written from the generator's
+    parameters, not from anything the pipeline computes."""
+    p = traj.params
+    face = np.array([0.0, 0.0, -(p.pivot_offset_m + p.lever_arm_m)])
+    return float(np.linalg.norm(np.cross(traj.omega_true[index], face)))
+
+
+@pytest.mark.parametrize("tempo", [1.5, 2.0, 3.0])
+@pytest.mark.parametrize("amplitude", [6.0, 12.0, 20.0])
+def test_impact_speed_matches_the_true_face_speed(tempo, amplitude):
+    """Parent spec 1.2.1: impact speed is a first-build metric.
+
+    Noiselessly, |omega x (d + r)| is exact given the rate, so what is left is
+    the pivot fit (about 2 mm on a 1.4 m radius, 0.15%) and WHEN: the
+    pipeline takes the last sample before the impact spike, because from the
+    spike on the gyro reads the collision as well as the swing. Held to 0.5%
+    against the truth at that sample, and the gap to the truth at the
+    generator's impact instant is printed -- it is the definition's cost, not
+    the algorithm's."""
+    traj, pipe, result = run_stroke(StrokeParams(
+        tempo_ratio=tempo, backswing_amplitude_deg=amplitude,
+        followthrough_amplitude_deg=amplitude))
+    at_sample = true_face_speed(traj, pipe.i_speed_n)
+    at_impact = true_face_speed(traj, traj.impact_index)
+    print(f"\n  tempo {tempo} amp {amplitude}: {result.impact_speed_mps:.4f} m/s, "
+          f"truth {at_sample:.4f} at its sample ({pipe.i_speed_n}), "
+          f"{at_impact:.4f} at impact ({traj.impact_index})")
+    assert pipe.i_speed_n < traj.impact_index
+    assert result.impact_speed_mps == pytest.approx(at_sample, rel=0.005)
+
+
+def test_impact_speed_under_noise():
+    """At the board's measured floor (0.28 dps, 1.5 dps bias), one stroke.
+    A single sample of rate carries 0.28 dps against ~50 dps at impact
+    (0.5%), and the per-stroke pivot fit a few mm more; 2% is about three
+    of those combined sigmas. The spread is printed."""
+    errors = []
+    for seed in range(1, 11):
+        traj, pipe, result = run_stroke(
+            StrokeParams(), SensorParams(gyro_noise_dps=0.28,
+                                         accel_noise_mps2=0.02,
+                                         gyro_bias_dps=1.5), seed=seed)
+        truth = true_face_speed(traj, pipe.i_speed_n)
+        errors.append(result.impact_speed_mps / truth - 1.0)
+    errors = np.array(errors)
+    print(f"\n  impact speed at 0.28 dps, 10 strokes: error mean "
+          f"{100 * errors.mean():+.2f}%, worst {100 * np.abs(errors).max():.2f}%")
+    assert np.abs(errors).max() < 0.02
+
+
+def test_impact_speed_does_not_depend_on_putter_type():
+    """Invariant 1: speed is swing, and a zero-torque putter swung the same
+    way arrives at the same speed as a blade."""
+    speeds = {arc.name: run_stroke(StrokeParams(arc_type=arc))[2].impact_speed_mps
+              for arc in ArcType}
+    assert max(speeds.values()) - min(speeds.values()) < 0.002 * max(speeds.values())
+
+
+def test_no_pivot_means_no_impact_speed_not_a_low_one():
+    """Without the pivot the face radius is the lever arm alone, 0.85 m
+    against 1.4 m: 39% low. That is not a measurement, so it is not
+    reported. Forced here by refusing every pivot fit."""
+    traj = generate(StrokeParams())
+    out = simulate(traj, SensorParams(), seed=1)
+    pipe = Pipeline(Thresholds(pivot_max_residual=-1.0), out.full_scale)
+    result = None
+    for i in range(len(traj.time)):
+        result = pipe.step(out.gyro_counts[i], out.accel_counts[i]) or result
+    assert result.impact_speed_mps is None
+    assert result.face_angle_deg == pytest.approx(0.0, abs=0.1)

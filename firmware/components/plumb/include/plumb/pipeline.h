@@ -109,6 +109,10 @@ typedef struct {
     pl_real path_arc_m;
     pl_real path_travel_m;
     pl_direction path_direction;
+    /* Clubhead speed arriving at the ball (parent spec 1.2.1). Unavailable
+     * without a pivot solution: the lever arm alone would read ~39% low. */
+    int speed_valid;
+    pl_real impact_speed_mps;
 } pl_stroke_result;
 
 typedef struct {
@@ -151,6 +155,10 @@ typedef struct {
     int impact_start_n;
     int impact_length;
     int impact_track_n;         /* first track sample after the spike began */
+    /* The last downswing sample before the spike, for impact speed. */
+    pl_real pre_impact_omega[3];
+    int has_pre_impact_omega;
+    int i_speed_n;
     pl_real q_impact[4];
     int has_q_impact;
 

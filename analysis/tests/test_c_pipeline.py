@@ -34,12 +34,14 @@ from plumb.sensor import GRAVITY, SensorParams, simulate
 from plumb.trajectory import SAMPLE_RATE_HZ, ArcType, StrokeParams, generate
 
 from tests.test_c_port import _build, fmt, run_c
-from tests.test_pipeline import true_face_path
+from tests.test_pipeline import true_face_path, true_face_speed
 
 NOISY = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
                      gyro_bias_dps=1.5)
 
 DIRECTIONS = {0: "straight", 1: "in-to-out", 2: "out-to-in"}
+RESULT_FIELDS = 11
+STATE_FIELDS = 18
 STATES = list(State)
 
 
@@ -82,8 +84,8 @@ class CStroke:
 
     def __init__(self, rows):
         assert rows[0] == [1.0], f"pipinit refused the config: {rows[0]}"
-        results = [r for r in rows[1:] if len(r) == 9]
-        states = [r for r in rows[1:] if len(r) == 17]
+        results = [r for r in rows[1:] if len(r) == RESULT_FIELDS]
+        states = [r for r in rows[1:] if len(r) == STATE_FIELDS]
         assert len(states) == 1 and len(results) <= 1
         self.result = None
         if results:
@@ -92,7 +94,8 @@ class CStroke:
                                backswing_s=r[2], downswing_s=r[3],
                                tempo_ratio=r[4], path_valid=bool(r[5]),
                                path_arc_m=r[6], path_travel_m=r[7],
-                               path_direction=DIRECTIONS[int(r[8])])
+                               path_direction=DIRECTIONS[int(r[8])],
+                               speed_valid=bool(r[9]), impact_speed_mps=r[10])
         s = states[0]
         self.state = STATES[int(s[0])]
         self.n = int(s[1])
@@ -101,6 +104,7 @@ class CStroke:
         self.i_impact, self.i_motion_end = int(s[10]), int(s[11])
         self.q_impact = np.array(s[12:16])
         self.track_first_n = int(s[16])
+        self.i_speed_n = int(s[17])
 
 
 def run_both(exe, stroke=StrokeParams(), sensor=SensorParams(), seed=1,
@@ -154,6 +158,7 @@ def compare(label, pipe, result, c, worst, tight=True):
     assert c.i_impact == pipe.i_impact, label
     assert c.i_motion_end == pipe.i_motion_end, label
     assert c.track_first_n == pipe._track_first_n, label
+    assert c.i_speed_n == pipe.i_speed_n, label
     worst.update("q at impact", np.abs(c.q_impact - pipe.q_impact).max())
 
     r = c.result
@@ -166,6 +171,10 @@ def compare(label, pipe, result, c, worst, tight=True):
     worst.update("arc (m)", abs(r["path_arc_m"] - result.path_arc_m))
     worst.update("travel (m)", abs(r["path_travel_m"] - result.path_travel_m))
     assert r["path_direction"] == result.path_direction, label
+    assert r["speed_valid"] == (result.impact_speed_mps is not None), label
+    if tight and result.impact_speed_mps is not None:
+        worst.update("impact speed (m/s)",
+                     abs(r["impact_speed_mps"] - result.impact_speed_mps))
 
 
 def test_every_stroke_matches_the_python(portcheck):
@@ -181,6 +190,7 @@ def test_every_stroke_matches_the_python(portcheck):
     assert v["face angle (deg)"] < 1e-8
     assert max(v["backswing (s)"], v["downswing (s)"], v["tempo ratio"]) < 1e-9
     assert max(v["arc (m)"], v["travel (m)"]) < 1e-9
+    assert v["impact speed (m/s)"] < 1e-12
 
 
 def test_the_c_meets_the_same_ground_truth(portcheck):
@@ -197,6 +207,9 @@ def test_the_c_meets_the_same_ground_truth(portcheck):
             arc_true, travel_true = true_face_path(traj, pipe)
             assert 0.90 < r["path_arc_m"] / arc_true < 1.10
             assert r["path_travel_m"] == pytest.approx(travel_true, rel=0.05)
+            assert r["speed_valid"]
+            assert r["impact_speed_mps"] == pytest.approx(
+                true_face_speed(traj, c.i_speed_n), rel=0.005)
 
 
 def test_a_calibrated_session_matches_the_python(portcheck):
@@ -217,7 +230,7 @@ def test_a_calibrated_session_matches_the_python(portcheck):
         expected.append(result)
         lines += [init_line(out.full_scale, calibrated_pivot=True),
                   *step_lines(out)]
-    rows = [r for r in run_c(portcheck, lines) if len(r) == 9]
+    rows = [r for r in run_c(portcheck, lines) if len(r) == RESULT_FIELDS]
     assert len(rows) == len(expected)
     worst = max(abs(row[6] - e.path_arc_m) for row, e in zip(rows, expected))
     print(f"\n  eight-stroke calibrated session, worst arc difference {worst:.3e} m")
@@ -311,6 +324,8 @@ def test_single_precision_divergence_is_measured_not_assumed(portcheck_single):
         worst.update("tempo ratio", abs(r["tempo_ratio"] - result.tempo_ratio))
         worst.update("arc (fraction)", abs(r["path_arc_m"] / result.path_arc_m - 1.0))
         worst.update("travel (fraction)", abs(r["path_travel_m"] / result.path_travel_m - 1.0))
+        worst.update("impact speed (fraction)",
+                     abs(r["impact_speed_mps"] / result.impact_speed_mps - 1.0))
     worst.report("single precision against float64, worst over the grid:")
     print(f"    boundaries moved: {boundaries or 'none'}")
     print(f"    directions changed: {directions or 'none'}")
@@ -318,4 +333,18 @@ def test_single_precision_divergence_is_measured_not_assumed(portcheck_single):
     assert v["face angle (deg)"] < 0.01
     assert v["tempo ratio"] < 0.01
     assert v["arc (fraction)"] < 0.01
+    assert v["impact speed (fraction)"] < 0.001
     assert v["face angle (deg)"] > 0.0, "float agreed exactly: the define did not take effect"
+
+
+def test_no_pivot_means_no_impact_speed_in_the_c_either(portcheck):
+    """The Python refuses a speed without the pivot rather than report one
+    39% low; the C has to refuse it the same way."""
+    from plumb.sensor import FullScale
+    traj = generate(StrokeParams())
+    out = simulate(traj, SensorParams(), seed=1)
+    lines = [init_line(out.full_scale, thresholds=Thresholds(pivot_max_residual=-1.0)),
+             *step_lines(out), "pipstate"]
+    r = CStroke(run_c(portcheck, lines)).result
+    assert not r["speed_valid"]
+    assert r["face_valid"]

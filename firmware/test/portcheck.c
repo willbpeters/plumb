@@ -78,7 +78,7 @@ static pl_pipeline pipeline;
 
 static void print_stroke(const pl_stroke_result *r)
 {
-    pl_real row[9];
+    pl_real row[11];
     row[0] = (pl_real)r->face_valid;
     row[1] = r->face_angle_deg;
     row[2] = r->backswing_s;
@@ -88,7 +88,9 @@ static void print_stroke(const pl_stroke_result *r)
     row[6] = r->path_arc_m;
     row[7] = r->path_travel_m;
     row[8] = (pl_real)r->path_direction;
-    print_reals(row, 9);
+    row[9] = (pl_real)r->speed_valid;
+    row[10] = r->impact_speed_mps;
+    print_reals(row, 11);
 }
 
 int main(void)
@@ -330,7 +332,7 @@ int main(void)
             }
 
         } else if (strcmp(op, "pipstate") == 0) {
-            pl_real row[17];
+            pl_real row[18];
             row[0] = (pl_real)pipeline.state;
             row[1] = (pl_real)pipeline.n;
             for (i = 0; i < 3; i++) {
@@ -343,7 +345,8 @@ int main(void)
             row[11] = (pl_real)pipeline.i_motion_end;
             for (i = 0; i < 4; i++) { row[12 + i] = pipeline.q_impact[i]; }
             row[16] = (pl_real)pipeline.track_first_n;
-            print_reals(row, 17);
+            row[17] = (pl_real)pipeline.i_speed_n;
+            print_reals(row, 18);
 
         } else if (strcmp(op, "precision") == 0) {
             printf("%s\n", PL_REAL_NAME);

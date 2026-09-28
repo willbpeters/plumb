@@ -273,8 +273,25 @@ Still to do on it, in order:
 > init rather than shortened. No threshold has a value anywhere in the C (invariant 5); they
 > arrive in `pl_pipeline_config`.
 >
-> **Not in the pipeline, Python or C: impact speed.** §1.2.1 makes it a first-build metric and
-> the UI has a screen for it, but nothing computes it yet. Python first.
+> **Impact speed — done, Python then C (2026-09-28).** |ω × (d + r)|: the face as a point of
+> the rigid body rotating about the fitted pivot. Taken at the last downswing sample before
+> the impact spike, because from the spike on the gyro reads the collision too. **Unavailable
+> without a pivot solution** — the lever arm alone reads 39% low (0.85 against ~1.4 m), and
+> that is not a measurement. Against the generator's true face speed:
+>
+> | | |
+> |---|---|
+> | Noiseless, 9 strokes, 0.49–3.29 m/s | ≤ 0.16% |
+> | Sample-before-impact against the true impact instant | ≤ 0.02% (the definition's cost) |
+> | 0.28 dps + 1.5 dps bias, 10 strokes | mean +0.04%, worst 0.70% |
+> | Across putter types | < 0.2% (invariant 1) |
+> | C against the Python, double / float | 2.7×10⁻¹⁵ m/s / 5.9×10⁻⁶ relative |
+>
+> **Your call: the spec has no accuracy target for impact speed.** §1.2.1 makes it a
+> first-build metric, but §3's table has no row for it, so nothing says what the §10 study
+> should hold it to. The harness numbers above are the evidence to set one from; the real
+> uncertainty will be larger (real strokes, a real pivot, a real lever-arm measurement —
+> the lever arm is a per-putter input, and an error in it is a proportional error in speed).
 >
 > **Startup rate measurement — done, on the board (2026-09-28).** `acq/rate.c`: least squares
 > of DRDY edge time (`esp_timer`) against the sensor's own sample index over the first 1,024
@@ -296,7 +313,6 @@ Still to do on it, in order:
 >    cross-compiled by hand with the ESP32-S3 GCC 14.2 at `-Werror`, both precisions.
 > 2. Thresholds on the device are the harness's placeholders until Phase 2 (invariant 5) —
 >    they must be passed in from one clearly-labelled place, not scattered.
-> 3. Impact speed, in Python first.
 
 > **`pivot.c` done (2026-09-28).** `analysis/tests/test_c_pivot.py`,
 > 9 tests, both precisions, checked to have run rather than skipped:
