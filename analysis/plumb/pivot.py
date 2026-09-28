@@ -73,10 +73,28 @@ the arced putter's weakest direction has 0.11 against 0.04 (kept).
 Nothing here keys off face rotation, so nothing carries a putter-type prior
 (invariant 1). The pivot is swing geometry: where the golfer's hands are.
 
-PORT NOTE. Centring is done from running sums (sum M^T M - S^T S / n), which
-cancels: fine in double, but in single precision the weakest eigenvalue
-(~0.07 against sums of ~300) keeps only ~4 significant digits. Use running
-means (Welford) in the C, and measure it with the differential harness.
+PORT NOTE -- measured, and the advice it used to give withdrawn. Centring is
+done from running sums (sum M^T M - S^T S / n), which cancels, and this note
+used to say to use running means (Welford) in the C. Measured 2026-09-27 with
+NumPy in float32 on the pipeline's own inputs (three putters, lie 5 and 20,
+clean and at 0.28 dps): running sums cost at most 0.17 mm of offset, Welford
+0.10 mm, against a 0.55 m offset. Not worth departing from the arithmetic
+this file was proven with, so firmware/components/plumb/src/pivot.c keeps
+running sums, and matches this file to 3e-16 in double. In float it differs
+by at most 0.53 mm per stroke and 0.11 mm over a calibrated session
+(tests/test_c_pivot.py).
+
+A PROPERTY OF THE SOLVE THE PORT SURFACED. The design energy is
+sum (|omega|^2 I - omega omega^T), so for a swing about one axis the two
+directions perpendicular to it carry exactly equal energy (204.9053 against
+204.9053 on the straight putter). Inside that plane the eigenvectors are an
+arbitrary basis, and the per-direction significance test below depends on
+the basis -- so the reported RANK there is not a stable quantity, and a
+sub-millimetre component can be kept by one solver and dropped by another.
+The offset moves by less than the component dropped (0.55 mm, worst seen). A
+basis-free test would decide significance for the plane as a whole; not done,
+because nothing measured so far says it matters. Revisit if rank is ever used
+for anything but reporting.
 """
 
 from dataclasses import dataclass

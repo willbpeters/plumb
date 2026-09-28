@@ -228,32 +228,37 @@ Still to do on it, in order:
   rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
   asks for it; not attempted, reasons in the skeleton spec).
 
-**1. Continue the C port.** `quat.c` is done and the infrastructure around it works, which was
-the risky part. Remaining: `pivot.c`, then `pipeline.c` — the state machine, which is the bulk.
+**1. Continue the C port.** `quat.c` and `pivot.c` are done. Remaining: `pipeline.c` — the
+state machine, which is the bulk.
 
-> **IN PROGRESS (2026-09-27, branch `c-port-pivot`, WIP commit — tests RED on purpose).**
-> Written: `analysis/tests/test_c_pivot.py` (test first), `plumb/pivot.h`, `src/pivot.c`
-> (running sums in the Python's order; Jacobi 3×3 eigensolver standing in for `eigh`), and
-> `pivot.c` registered in the component `CMakeLists.txt` and `cbuild.py`. The test fails
-> with `unknown op: pivreset` — expected; the harness side is not written yet.
+> **`pivot.c` done (2026-09-28, branch `c-port-pivot`).** `analysis/tests/test_c_pivot.py`,
+> 9 tests, both precisions, checked to have run rather than skipped:
 >
-> Resume here, in order:
-> 1. `firmware/test/portcheck.c`: `#include "plumb/pivot.h"` and `<stdlib.h>`, raise
->    `LINE_MAX_CHARS` to 1024 (`pivupdate` carries 15 numbers), add a `parse_reals` helper
->    (strtod loop) and a `print_solution` helper (prints `0` for no solution, else
->    `1 d0 d1 d2 rank residual_fraction samples`). Ops, matching the test file:
->    `pivreset dt`, `pivnoise c0..c8 samples`, `pivupdate w0..w2 a0..a2 R0..R8`,
->    `pivnormal` (prints ata[9] atb[3] btb samples noise[9] noise_variance = 24 numbers),
->    `pivsolve`, `calreset`, `calfold` (folds the current estimator), `calsolve`.
-> 2. `cd analysis; uv run pytest tests/test_c_pivot.py tests/test_c_port.py -q -s` — both
->    precisions; confirm they RAN, not skipped. If normal equations don't match to 1e-12,
->    suspect NumPy's `@` going through BLAS (possibly FMA) before suspecting the C.
-> 3. Replace the PORT NOTE in `pivot.py`: **measured 2026-09-27** with NumPy float32 on the
->    pipeline's own pivot inputs (12 strokes: 3 putters × lie 5/20 × clean/noisy): running
->    sums cost ≤0.17 mm of offset on the arced putter, Welford ≤0.10 mm, the other putters
->    0.000 mm — against a 0.55 m offset. Welford is not worth departing from the proven
->    arithmetic; the port keeps running sums. Update with the real C single-precision number.
-> 4. Full suite, then commit.
+> | | double | float |
+> |---|---|---|
+> | normal equations vs NumPy | 3.4×10⁻¹⁶ relative | — |
+> | offset vs NumPy, per stroke | 2.4×10⁻¹³ m | ≤ 0.53 mm |
+> | offset vs NumPy, 10-stroke session | < 10⁻⁹ m | 0.11 mm |
+> | 10 arced strokes at 0.28 dps, vs truth | 4.50 mm | — |
+>
+> Plus ground truth on the rank-deficient single-axis swing, the straight putter's
+> noise-only direction, and the no-estimate cases. The solve uses Jacobi rotations in place
+> of LAPACK's `eigh`, so it is compared on offset, rank and residual rather than bit for bit.
+> Cross-compiled clean with the ESP32-S3 GCC 14.2 at `-Werror` in both precisions — by hand:
+> **nothing in `main` requires the `plumb` component yet, so `idf.ps1 build` compiles
+> neither `quat.c` nor `pivot.c`.** That changes when `pipeline.c` is wired in.
+>
+> **Welford was not adopted.** The old port note asked for it; measured in NumPy float32
+> first, running sums cost ≤ 0.17 mm of offset and Welford ≤ 0.10 mm. The port keeps the
+> Python's arithmetic. `pivot.py`'s port note now says so.
+>
+> **Found by the port, recorded, not fixed — Will's call if it ever matters.** The design
+> energy is Σ(|ω|²I − ωωᵀ), so for a single-axis swing the two directions perpendicular to
+> the axis carry *exactly* equal energy (204.9053 against 204.9053). The eigenvectors in that
+> plane are an arbitrary basis and the per-direction significance test depends on the basis,
+> so the reported **rank** there is not a stable quantity: float dropped a 0.55 mm component
+> that double kept, once in twelve strokes. The offset moved 0.53 mm. Nothing consumes rank
+> except reporting. A basis-free test would judge the degenerate plane as a whole.
 >
 > **Will's decision, 2026-09-27: the firmware measures its own sample rate at startup** from
 > the IMU's counter (next task 2 below is settled). `pipeline.c` takes dt from that

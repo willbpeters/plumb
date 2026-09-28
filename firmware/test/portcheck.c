@@ -16,11 +16,14 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "plumb/pivot.h"
 #include "plumb/quat.h"
 
-#define LINE_MAX_CHARS 512
+/* pivupdate carries fifteen numbers at up to ~25 characters each. */
+#define LINE_MAX_CHARS 1024
 
 static void print_reals(const pl_real *values, int count)
 {
@@ -33,14 +36,57 @@ static void print_reals(const pl_real *values, int count)
     printf("\n");
 }
 
+/* Parse exactly `count` numbers after the op name, each as a double and then
+ * converted once to pl_real, as the quaternion ops do. 0 if the line is short. */
+static int parse_reals(const char *line, pl_real *out, int count)
+{
+    const char *at = line + strcspn(line, " \t");
+    int i;
+    for (i = 0; i < count; i++) {
+        char *end;
+        const double value = strtod(at, &end);
+        if (end == at) {
+            return 0;
+        }
+        out[i] = (pl_real)value;
+        at = end;
+    }
+    return 1;
+}
+
+/* "0" for no solution, else 1, offset[3], rank, residual_fraction, samples. */
+static void print_solution(int solved, const pl_pivot_solution *solution)
+{
+    pl_real row[7];
+    if (!solved) {
+        printf("0\n");
+        return;
+    }
+    row[0] = (pl_real)1.0;
+    row[1] = solution->offset[0];
+    row[2] = solution->offset[1];
+    row[3] = solution->offset[2];
+    row[4] = (pl_real)solution->rank;
+    row[5] = solution->residual_fraction;
+    row[6] = (pl_real)solution->samples;
+    print_reals(row, 7);
+}
+
 int main(void)
 {
+    /* The pivot estimator and session calibration, carried between lines in
+     * pl_real exactly as the device carries them through a stroke. */
+    pl_pivot_estimator pivot;
+    pl_pivot_calibration calibration;
     char line[LINE_MAX_CHARS];
     /* Attitude carried between lines by the seq* ops, in pl_real, exactly as
      * the device will carry it from sample to sample. Every other op starts
      * from inputs parsed as double; this one never goes back to double, so
      * rounding compounds across a stroke the way it will on hardware. */
     pl_real state[4] = {1, 0, 0, 0};
+
+    pl_pivot_init(&pivot, (pl_real)0.0);
+    pl_pivot_calibration_init(&calibration);
 
     while (fgets(line, sizeof(line), stdin) != NULL) {
         char op[32];
@@ -161,6 +207,57 @@ int main(void)
             result[0] = pl_quat_twist_angle(state, qv);
             for (i = 0; i < 4; i++) { result[i + 1] = state[i]; }
             print_reals(result, 5);
+
+        } else if (strcmp(op, "pivreset") == 0) {
+            pl_real step;
+            if (!parse_reals(line, &step, 1)) {
+                fprintf(stderr, "bad pivreset: %s", line);
+                return 1;
+            }
+            pl_pivot_init(&pivot, step);
+
+        } else if (strcmp(op, "pivnoise") == 0) {
+            pl_real values[10];
+            if (!parse_reals(line, values, 10)) {
+                fprintf(stderr, "bad pivnoise: %s", line);
+                return 1;
+            }
+            pl_pivot_set_noise(&pivot, values, (int)values[9]);
+
+        } else if (strcmp(op, "pivupdate") == 0) {
+            pl_real values[15];
+            if (!parse_reals(line, values, 15)) {
+                fprintf(stderr, "bad pivupdate: %s", line);
+                return 1;
+            }
+            pl_pivot_update(&pivot, values, values + 3, values + 6);
+
+        } else if (strcmp(op, "pivnormal") == 0) {
+            pl_pivot_normal eq;
+            pl_real row[24];
+            pl_pivot_normal_equations(&pivot, &eq);
+            for (i = 0; i < 9; i++) { row[i] = eq.ata[i]; }
+            for (i = 0; i < 3; i++) { row[9 + i] = eq.atb[i]; }
+            row[12] = eq.btb;
+            row[13] = (pl_real)eq.samples;
+            for (i = 0; i < 9; i++) { row[14 + i] = eq.noise[i]; }
+            row[23] = eq.noise_variance;
+            print_reals(row, 24);
+
+        } else if (strcmp(op, "pivsolve") == 0) {
+            pl_pivot_solution solution;
+            print_solution(pl_pivot_solve(&pivot, &solution), &solution);
+
+        } else if (strcmp(op, "calreset") == 0) {
+            pl_pivot_calibration_init(&calibration);
+
+        } else if (strcmp(op, "calfold") == 0) {
+            pl_pivot_calibration_fold(&calibration, &pivot);
+
+        } else if (strcmp(op, "calsolve") == 0) {
+            pl_pivot_solution solution;
+            print_solution(pl_pivot_calibration_solve(&calibration, &solution),
+                           &solution);
 
         } else if (strcmp(op, "precision") == 0) {
             printf("%s\n", PL_REAL_NAME);

@@ -133,7 +133,9 @@ def test_normal_equations_match_the_python(portcheck, strokes):
 def test_solution_matches_the_python(portcheck, strokes):
     """The offset the path uses, its rank and its residual -- everything the
     eigenvectors feed. The rank is compared exactly: a direction kept by one
-    and dropped by the other is a disagreement about what was measured."""
+    and dropped by the other is a disagreement about what was measured. In
+    double that holds even in the degenerate swing plane (see the
+    single-precision test), because double resolves its ~1e-7 split."""
     worst = 0.0
     for label, est in strokes:
         expected = est.solve()
@@ -271,10 +273,27 @@ def test_single_precision_divergence_is_measured_not_assumed(
     offset. Not worth departing from the arithmetic the Python was proven
     with; this test keeps the number honest now that it is the real C.
 
+    MEASURED ON THE C, 2026-09-28: 0.529 mm worst per stroke (the rank case
+    below; 0.400 mm otherwise, arced lie 5 clean), 0.109 mm over the
+    ten-stroke session -- the number the path actually uses once calibrated.
+
+    RANK IS NOT COMPARED HERE, and the reason is physics, not tolerance. The
+    design's energy is sum (|omega|^2 I - omega omega^T): for a swing about
+    one axis, the two directions perpendicular to it carry EXACTLY equal
+    energy. Measured 2026-09-28: 204.9053 against 204.9053, split at ~1e-7
+    relative -- resolvable in double, at the rounding floor in float. Inside
+    that plane the eigenvectors are an arbitrary basis, so the per-direction
+    significance test can keep or drop a sub-millimetre component depending
+    on which basis the solver happened to pick. It did so once in twelve
+    strokes (near-zero-rotation, lie 5, clean: rank 1 against 2, a 0.55 mm
+    component dropped from a 551 mm offset). The offset -- what the path
+    uses -- is what has to agree, and it is bounded below.
+
     Loose bound on purpose, like test_c_port's: it catches a build that is
     broken, and the printed number is the output.
     """
     worst = 0.0
+    rank_disagreements = []
     for label, est in strokes:
         expected = est.solve()
         produced = c_solve(portcheck_single, est.lines)
@@ -282,7 +301,8 @@ def test_single_precision_divergence_is_measured_not_assumed(
         if expected is None:
             continue
         offset, rank, _, _ = produced
-        assert rank == expected.rank, label
+        if rank != expected.rank:
+            rank_disagreements.append(f"{label}: {rank} vs {expected.rank}")
         worst = max(worst, float(np.abs(offset - expected.offset).max()))
 
     session = arced_session()
@@ -292,6 +312,8 @@ def test_single_precision_divergence_is_measured_not_assumed(
 
     print(f"\n  single precision: worst offset difference {1e3 * worst:.3f} mm "
           f"per stroke, {1e3 * session_worst:.3f} mm over a ten-stroke session")
+    print(f"  rank disagreements (degenerate swing plane): "
+          f"{rank_disagreements or 'none'}")
     assert worst < 1e-3
     assert session_worst < 1e-3
     assert worst > 0.0, "float agreed exactly: the define did not take effect"
