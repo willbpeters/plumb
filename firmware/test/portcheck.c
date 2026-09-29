@@ -78,6 +78,9 @@ static void print_solution(int solved, const pl_pivot_solution *solution)
  * stack. */
 static pl_pipeline pipeline;
 static pl_session session;
+static pl_real track_v[PL_PIPELINE_TRACK_MAX][3];
+static pl_real track_m[PL_PIPELINE_TRACK_MAX][9];
+static const pl_track track = {track_v, track_m};
 
 #define CONFIG_VALUES 24
 
@@ -340,7 +343,8 @@ int main(void)
             config_from(values, &cfg);
             printf("%d\n", pl_pipeline_init(&pipeline, &cfg,
                                             values[CONFIG_VALUES] != 0
-                                                ? &calibration : NULL));
+                                                ? &calibration : NULL,
+                                            &track));
 
         } else if (strcmp(op, "pipstep") == 0) {
             int16_t gyro[3], accel[3];
@@ -361,7 +365,7 @@ int main(void)
                 return 1;
             }
             config_from(values, &cfg);
-            printf("%d\n", pl_session_init(&session, &cfg));
+            printf("%d\n", pl_session_init(&session, &cfg, &track));
 
         } else if (strcmp(op, "sesstep") == 0) {
             /* A result row (11 values), and on the step a stroke was

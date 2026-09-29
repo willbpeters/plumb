@@ -363,6 +363,16 @@ During an armed stroke, the UI renders nothing. The screen displays a result onl
 follow-through completes, when nobody is looking at it anyway. This removes rendering as a
 source of sampling jitter entirely.
 
+**The stroke is armed from BACKSWING through FOLLOWTHROUGH**, and the stroke pipeline itself
+arms and opens the gate. It runs on core 1 as the ring is drained, so its end-of-stroke
+computation never delays a read on core 0.
+
+*Amended 2026-09-28 (Will's decision).* "Armed" was not defined. Arming at ADDRESS would freeze
+the screen, swipes included, whenever the putter was still — lying on a table included —
+because still is what ADDRESS means. Arming at BACKSWING confirmation leaves the stroke's first
+~45 ms (onset, plus the confirmation hold) sampled with the gate open. Since the I²C driver
+moved to IRAM that costs a timing tail, not samples: rendering while streaming lost 0 of 55,064.
+
 ### 6.3 Display configuration
 
 ```
@@ -381,6 +391,30 @@ Draw buffers are placed in internal SRAM rather than PSRAM. Published benchmarks
 PSRAM framebuffers on this display use 8 MB octal PSRAM; this board carries 2 MB quad PSRAM at
 roughly half the bandwidth, where internal SRAM wins. Espressif's guidance of 10–25% of screen
 resolution per buffer, double-buffered, is followed.
+
+**LVGL's code runs from flash (`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` off), and its heap is
+32 KB, not 96.**
+
+*Amended 2026-09-28 (Will's decision).* The block above previously set
+`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`. The stroke pipeline needs 157 KB of internal SRAM in
+single precision, 130 KB of it the 3 s path buffer, and only 38.7 KB was free. LVGL held
+211 KB: 112 KB of code copied into IRAM, and a 96 KB static heap that peaked at **9,968 bytes**
+on the board, measured twice with every screen cycled for 20 s. Moving the code to flash and
+the heap to 32 KB (3.2× the peak) left 204 KB free. It did not fit as one block: the S3's
+internal heap is several regions, and the largest was 127–139 KB. The path buffer is therefore
+allocated as separate pieces. The alternative, the path buffer in PSRAM, would have amended
+invariant 7 instead.
+
+The cost, measured on the board with the same instrument before and after (`lv_timer_handler`
+duration while cycling screens, 20 s):
+
+| | Draws | Mean | Max |
+|---|---|---|---|
+| LVGL in IRAM, 96 KB heap | 1,362 | 14.05 ms | 16.32 ms |
+| LVGL in flash, 32 KB heap | 1,290 | 14.83 ms (+5.6%) | 18.30 ms |
+
+Rendering happens only with the gate open (§6.2), never during a stroke, so its speed costs
+result latency and not sampling.
 
 ### 6.4 IMU acquisition
 

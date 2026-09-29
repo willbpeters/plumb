@@ -41,7 +41,7 @@ static void enter(pl_pipeline *p, pl_state state)
 }
 
 int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
-                     pl_pivot_calibration *calibration)
+                     pl_pivot_calibration *calibration, const pl_track *track)
 {
     int i;
 
@@ -95,6 +95,8 @@ int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
     pl_quat_identity(p->q_impact);
     p->has_q_impact = 0;
 
+    p->track_v = track->v;
+    p->track_m = track->m;
     p->track_first_n = 0;
     p->track_last_n = 0;
     p->has_track = 0;

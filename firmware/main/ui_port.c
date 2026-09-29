@@ -122,11 +122,36 @@ esp_err_t ui_port_init(void)
     return ESP_OK;
 }
 
+/* How long lv_timer_handler() takes, so rendering speed is a measurement --
+ * the trade made when LVGL's code left IRAM for the stroke pipeline's memory
+ * (spec 6.3, amended 2026-09-28). A call over RENDER_MIN_US drew something;
+ * the rest only checked timers. Reset by ui_port_render_reset(). */
+#define RENDER_MIN_US 2000
+static uint32_t s_render_max_us;
+static uint64_t s_render_total_us;
+static uint32_t s_renders;
+
 void ui_port_service(void)
 {
     if (!gate_armed()) {
+        const int64_t t0 = esp_timer_get_time();
         lv_timer_handler();
+        const uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+        if (us > s_render_max_us) {
+            s_render_max_us = us;
+        }
+        if (us > RENDER_MIN_US) {
+            s_render_total_us += us;
+            s_renders++;
+        }
     }
+}
+
+void ui_port_render_reset(void)
+{
+    s_render_max_us = 0;
+    s_render_total_us = 0;
+    s_renders = 0;
 }
 
 void ui_port_example_result(void)
@@ -144,6 +169,37 @@ void ui_port_example_result(void)
     r.path_travel_m = 0.30f;
     r.speed_valid = true;
     r.impact_speed_mps = 1.62f;
+    pl_ui_show_result(&r);
+}
+
+/* The pipeline's face angle is the twist about measured gravity, and at rest
+ * the accelerometer reads specific force UPWARD, so positive is counter-
+ * clockwise seen from above -- whatever way the board sits in the grip, since
+ * it is a rotation about a world axis. plumb_ui draws + as OPEN. For a
+ * right-handed golfer in the UI's frame (target left, golfer at the bottom),
+ * open points right of the target, away from the golfer: CLOCKWISE from
+ * above, negative. Hence -1.
+ *
+ * DERIVED, NOT MEASURED (2026-09-28). No test has checked it: open the face at
+ * address on the bench, make a stroke, read the label. A left-handed golfer
+ * flips it, and nothing on the device knows handedness yet. */
+#define FACE_OPEN_SIGN (-1.0f)
+
+void ui_port_show_stroke(const pl_stroke_result *s)
+{
+    pl_ui_result r = {0};
+    r.face_valid = s->face_valid != 0;
+    r.face_angle_deg = FACE_OPEN_SIGN * (float)s->face_angle_deg;
+    r.tempo_valid = true;
+    r.backswing_s = (float)s->backswing_s;
+    r.downswing_s = (float)s->downswing_s;
+    r.path_valid = s->path_valid != 0;
+    /* pl_direction's values are pl_path_dir's, by construction (pipeline.h). */
+    r.path_dir = (pl_path_dir)s->path_direction;
+    r.path_arc_m = (float)s->path_arc_m;
+    r.path_travel_m = (float)s->path_travel_m;
+    r.speed_valid = s->speed_valid != 0;
+    r.impact_speed_mps = (float)s->impact_speed_mps;
     pl_ui_show_result(&r);
 }
 
@@ -178,7 +234,17 @@ void ui_port_status(void)
     uart_io_printf("# ui: screen %d, missing glyphs %lu, exercise %s, touch %s\n",
                    pl_ui_current_screen(), (unsigned long)pl_ui_missing_glyphs(),
                    s_exercising ? "on" : "off", s_touch_ok ? "ok" : "absent");
-    uart_io_printf("# heap: internal free %u B, PSRAM free %u B\n",
+    uart_io_printf("# render: %lu draws, mean %.2f ms, max %.2f ms (lv_timer_handler)\n",
+                   (unsigned long)s_renders,
+                   s_renders ? (double)s_render_total_us / s_renders / 1000.0 : 0.0,
+                   s_render_max_us / 1000.0);
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    uart_io_printf("# lvgl heap: %u B total, %u B in use now, %u B at most (%u%%)\n",
+                   (unsigned)mon.total_size, (unsigned)(mon.total_size - mon.free_size),
+                   (unsigned)mon.max_used, (unsigned)mon.used_pct);
+    uart_io_printf("# heap: internal free %u B (largest block %u B), PSRAM free %u B\n",
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }

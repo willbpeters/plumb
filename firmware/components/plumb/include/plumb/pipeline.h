@@ -176,9 +176,10 @@ typedef struct {
     pl_real q_impact[4];
     int has_q_impact;
 
-    /* Path: per-sample R v dt and R [omega]x dt, slot n % TRACK_MAX. */
-    pl_real track_v[PL_PIPELINE_TRACK_MAX][3];
-    pl_real track_m[PL_PIPELINE_TRACK_MAX][9];
+    /* Path: per-sample R v dt and R [omega]x dt, slot n % TRACK_MAX, in
+     * storage the caller supplies (pl_track). */
+    pl_real (*track_v)[3];
+    pl_real (*track_m)[9];
     int track_first_n;
     int track_last_n;
     int has_track;
@@ -189,12 +190,22 @@ typedef struct {
     int has_pivot_solution;
 } pl_pipeline;
 
+/* The path ring's storage, 48 bytes a sample in single precision -- almost
+ * all of a pipeline's memory. Two arrays the caller supplies, not one member:
+ * on the ESP32-S3 the internal heap is several regions, and measured
+ * 2026-09-28 the largest contiguous block was 127-139 KB with 204 KB free.
+ * The matrices alone are 98 KB and the vectors 33 KB; apart, they fit. */
+typedef struct {
+    pl_real (*v)[3];    /* PL_PIPELINE_TRACK_MAX rows */
+    pl_real (*m)[9];    /* PL_PIPELINE_TRACK_MAX rows */
+} pl_track;
+
 /* Returns 0 if the config cannot be run: a stillness window that is empty or
  * larger than PL_PIPELINE_STILL_MAX at this sample rate. `calibration` may be
  * NULL; if not, it must outlive the stroke, and the stroke is folded into it
- * at DONE. */
+ * at DONE. `track`'s storage must outlive the pipeline. */
 int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
-                     pl_pivot_calibration *calibration);
+                     pl_pivot_calibration *calibration, const pl_track *track);
 
 /* One sample, in raw counts. Returns 1 and fills `out` on the sample the
  * stroke completes; 0 otherwise. A stroke that never reaches impact ends in

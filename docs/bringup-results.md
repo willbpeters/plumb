@@ -950,3 +950,33 @@ the board can shrink it — the crystal is the reference.
 About 75 ppm between days and 7 ppm of warm-up. None of it matters to a metric (100 ppm is
 0.001° on a 10° rotation, against 11,200 ppm uncorrected), but every one of those numbers
 would have been a stale constant.
+
+---
+
+## The stroke pipeline on the board (2026-09-28)
+
+`firmware/main/stroke.c`: a `pl_session` on the app task (core 1), fed from the ring drain,
+driving the render gate from BACKSWING through FOLLOWTHROUGH.
+
+**Memory.** The first link overflowed `dram0_0_seg` by 143,912 bytes: a 157 KB session in
+single precision, 130 KB of it the 3 s path ring. At runtime 38.7 KB of internal SRAM was free.
+
+| | Internal SRAM |
+|---|---|
+| LVGL code in IRAM (`LV_ATTRIBUTE_FAST_MEM_USE_IRAM`) | 111,946 B |
+| LVGL static heap (`LV_MEM_SIZE` 96 KB) | 98,844 B |
+| LVGL heap actually used, every screen cycled 20 s, measured twice | **9,968 B peak** |
+| Free after moving LVGL code to flash and the heap to 32 KB | 204,415 B |
+| Largest single free block | 126,976–139,264 B — the session did not fit in one piece |
+| Free after the path ring (98 KB + 33 KB) and session (26 KB), allocated separately | **58,799 B** |
+
+**Rendering cost of LVGL in flash** — `lv_timer_handler` duration while cycling screens, 20 s:
+14.05 ms mean / 16.32 ms max in IRAM, 14.83 / 18.30 ms in flash.
+
+**Step cost at rest** (ADDRESS, float): mean 272 µs, max 743 µs over 8,185 steps, against a
+1,103 µs sample period. Most of it is the rest test's per-sample window statistics.
+
+**Sample rate this boot:** 906.8538–906.8686 Hz across three boots, against 906.93 earlier the
+same day — another ~75 ppm of the drift spec §6.4 now absorbs.
+
+**Not yet exercised:** a real stroke. That needs a hand on the board; HANDOFF.md, next task 1.

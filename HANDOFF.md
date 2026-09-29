@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries nine marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries eleven marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -228,9 +228,44 @@ Still to do on it, in order:
   rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
   asks for it; not attempted, reasons in the skeleton spec).
 
-**1. The C port is complete; wire it into the firmware.** `quat.c`, `pivot.c` and
-`pipeline.c` all done, all verified against the Python and against ground truth (branch
-`c-port-pivot`). What is left is the firmware around it — see "Next, in order" below.
+**1. The pipeline runs on the board (2026-09-28). What it needs now is a real stroke — yours.**
+
+> **Wired.** `firmware/main/stroke.c` owns a `pl_session` on the app task (core 1, spec §6.2),
+> fed every new sample from the ring drain once the startup rate is measured, and drives the
+> render gate: armed BACKSWING → FOLLOWTHROUGH (your call). Results go to the screens and the
+> console (`# stroke N: face … rel. address, tempo …, speed …, path …, lost in stroke N,
+> compute N us`); abandons print why. `?` shows state, counts, step cost, heap.
+> Placeholders — all thresholds and the 0.85 m lever arm — live in one file,
+> `main/stroke_config.c`, and `tests/test_stroke_config.py` fails if they drift from the
+> Python's.
+>
+> **Memory, measured and fixed (your call: trim LVGL).** The 157 KB pipeline did not fit —
+> 38.7 KB free. LVGL held 211 KB: 112 KB of code in IRAM and a 96 KB heap that peaked at
+> 9,968 B. Code to flash + heap to 32 KB → 204 KB free, but the largest block was 127–139 KB,
+> so the path ring is now caller-supplied storage (`pl_track`) allocated in three pieces.
+> After: **58.8 KB internal free**. Rendering 14.05 → 14.83 ms mean (+5.6%). Spec §6.3 amended.
+>
+> **Precision is settled by memory:** in double the path ring alone is 261 KB and cannot fit.
+> The device builds single (`PLUMB_DOUBLE` CMake option, PUBLIC define so `main` and the
+> component agree on `pl_real`). Single's cost is measured: 3.3×10⁻⁵° of face angle.
+>
+> **At rest on the board:** state ADDRESS, step mean **272 µs**, max 743 µs against the
+> 1,103 µs period — ~25% of core 1, mostly the rest test's per-sample window std. 0 samples
+> lost after boot (1 during boot, the known defect).
+>
+> **Blocked on you — the bench check (10 minutes, board on USB):**
+> 1. Hold it still ~1 s (ADDRESS), swing it like a short putt, **tap it hard on the table at
+>    the bottom** (the impact trigger is 100 m/s² ≈ 10 g), hold still ~0.5 s. Expect
+>    `# stroke 1: …` and the result screens. Watch `lost in stroke` (should be 0) and
+>    `compute` (end-of-stroke cost; §3 target is 500 ms latency).
+> 2. Swing without the tap, then put it down: expect `# stroke abandoned (rest) from DOWNSWING`.
+> 3. **The face-angle sign.** Open the face (turn the toe away) during a stroke and check the
+>    screen says OPEN. `FACE_OPEN_SIGN` in `main/ui_port.c` is **derived for a right-handed
+>    golfer, not measured**; nothing on the device knows handedness yet.
+> 4. Swipe between screens at rest — the gate should leave touch alone until a backswing.
+>
+> **Not done:** the impact spike on a real strike (the harness's is a 60 g Hanning pulse);
+> a gap in samples mid-stroke is counted and reported, not corrected; the §11 log.
 
 > **`pipeline.c` done (2026-09-28).** `analysis/tests/test_c_pipeline.py`, 10 tests. The C is
 > fed the simulator's int16 counts and compared at every stage over 14 strokes (three putters,
@@ -306,13 +341,6 @@ Still to do on it, in order:
 > `?`; `m` re-measures; `stream_sample_rate()` returns it. Spec §6.4 amended, §7.2 points at
 > it. `uv run python -m tools.rate_check --port COM4` repeats the whole check.
 >
-> **Next, in order:**
-> 1. **Wire `pl_pipeline` into `main`**, with `sample_rate_hz` from `stream_sample_rate()`: acquisition ring → `pl_pipeline_step` on core 0 →
->    result to the UI on core 1, gate armed from ADDRESS to DONE (invariant 8). Add `plumb` to
->    `main`'s REQUIRES — until then **`idf.ps1 build` compiles none of the port**; it has been
->    cross-compiled by hand with the ESP32-S3 GCC 14.2 at `-Werror`, both precisions.
-> 2. Thresholds on the device are the harness's placeholders until Phase 2 (invariant 5) —
->    they must be passed in from one clearly-labelled place, not scattered.
 
 > **`pivot.c` done (2026-09-28).** `analysis/tests/test_c_pivot.py`,
 > 9 tests, both precisions, checked to have run rather than skipped:
@@ -392,7 +420,7 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Nine amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+Eleven amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
 one new section. The four to §6.4 came from reading the datasheet or measuring the hardware;
 the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
 records what the path code has actually done since the pivot estimate went in; the §4.4 one
@@ -409,6 +437,8 @@ records the charger the schematic actually shows; the §6.2 one records data-rea
 | 6.2 | "hardware-timer driven" | **paced by the IMU's DRDY line** | A timer on the ESP32's clock drifts against the IMU's 906.86 Hz and would duplicate or miss ~1 sample in 100. Amended 2026-09-27 with the skeleton's loss and jitter measurements. |
 | 6.4 | 896.8 Hz, used as the rate | **the rate measured at startup** | This unit runs 1.12% fast and moves ~75 ppm between days; a constant goes stale. Measured to ~15 ppm (crystal-bound). Will's decision 2026-09-27, amended 2026-09-28 with the board measurements. |
 | 7.1 | forward only | **ABANDONED on rest or timeout before impact; DONE without path on timeout after** | A practice stroke waited in DOWNSWING forever with rendering suspended. Rest = the address test failing then passing again. Will's decision, amended 2026-09-28. |
+| 6.3 | LVGL code in IRAM, 96 KB heap | **LVGL in flash, 32 KB heap** | The stroke pipeline needed the internal SRAM; LVGL's heap peaked at 9,968 B. Rendering +5.6%. Amended 2026-09-28, Will's decision. |
+| 6.2 | "armed" undefined | **armed BACKSWING → FOLLOWTHROUGH, by the pipeline** | Arming at ADDRESS would freeze swipes whenever the putter lay still. Amended 2026-09-28, Will's decision. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.

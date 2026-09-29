@@ -18,8 +18,15 @@
 #define LV_USE_OS LV_OS_NONE
 
 /* LVGL's own heap, for objects and draw tasks. Not the draw buffers, which the
- * caller supplies (internal SRAM on the device, invariant 7). */
-#define LV_MEM_SIZE (96 * 1024)
+ * caller supplies (internal SRAM on the device, invariant 7).
+ *
+ * 32 KB, down from 96. Measured on the board 2026-09-28, every screen cycled
+ * for 20 s with animations: at most 9,968 bytes in use, twice. 32 KB is 3.2x
+ * that. The 64 KB returned is part of what the stroke pipeline needs in
+ * internal SRAM (parent spec 6.3, amended 2026-09-28). `?` on the console
+ * prints the high-water mark; a screen that allocates more has to be
+ * re-measured against this. */
+#define LV_MEM_SIZE (32 * 1024)
 
 /* Parent spec 6.3: display refresh period 10 ms. Also the animation tick, so
  * the host bench resolves motion to 10 ms. */

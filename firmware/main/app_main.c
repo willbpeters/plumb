@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "gate.h"
 #include "stream.h"
+#include "stroke.h"
 #include "uart_io.h"
 #include "ui_port.h"
 
@@ -37,6 +38,7 @@ static esp_err_t s_ui_result = ESP_FAIL;
 static void status(void)
 {
     stream_status();
+    stroke_status();
     uart_io_printf("# imu %s (init step %d, ctrl9 %ld us, SDA at boot %d, clear clocks %d, SDA after clear %d), ui %s\n",
                    esp_err_to_name(s_imu_result), qmi8658_init_step(),
                    (long)qmi8658_ctrl9_us(), board_i2c_sda_at_boot(),
@@ -64,6 +66,7 @@ static void console(char c)
     case 'm': stream_measure_rate(); uart_io_printf("# measuring sample rate\n"); break;
     case '?': status(); break;
     case 'x':
+        ui_port_render_reset();
         if (ui) {
             ui_port_set_exercise(!ui_port_exercise());
             uart_io_printf("# exercise %s\n", ui_port_exercise() ? "on" : "off");

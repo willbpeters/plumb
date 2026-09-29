@@ -20,6 +20,7 @@ typedef struct {
     pl_pipeline pipeline;
     pl_pivot_calibration calibration;
     pl_pipeline_config cfg;
+    pl_track track;
     uint32_t strokes;               /* results produced */
     uint32_t abandoned;             /* strokes abandoned */
     /* Set on the step a stroke was abandoned, cleared on the next. */
@@ -29,7 +30,8 @@ typedef struct {
 } pl_session;
 
 /* 0 if the pipeline refuses the config (pl_pipeline_init). */
-int pl_session_init(pl_session *s, const pl_pipeline_config *cfg);
+int pl_session_init(pl_session *s, const pl_pipeline_config *cfg,
+                    const pl_track *track);
 
 /* One sample. Returns 1 and fills `out` on the sample a stroke finishes. */
 int pl_session_step(pl_session *s, const int16_t gyro_counts[3],

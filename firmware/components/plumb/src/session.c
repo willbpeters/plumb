@@ -2,16 +2,18 @@
 
 #include "plumb/session.h"
 
-int pl_session_init(pl_session *s, const pl_pipeline_config *cfg)
+int pl_session_init(pl_session *s, const pl_pipeline_config *cfg,
+                    const pl_track *track)
 {
     s->cfg = *cfg;
+    s->track = *track;
     s->strokes = 0;
     s->abandoned = 0;
     s->abandoned_this_step = 0;
     s->last_abandon_reason = PL_ABANDON_NONE;
     s->last_abandoned_from = PL_STATE_IDLE;
     pl_pivot_calibration_init(&s->calibration);
-    return pl_pipeline_init(&s->pipeline, &s->cfg, &s->calibration);
+    return pl_pipeline_init(&s->pipeline, &s->cfg, &s->calibration, &s->track);
 }
 
 int pl_session_step(pl_session *s, const int16_t gyro_counts[3],
@@ -32,7 +34,8 @@ int pl_session_step(pl_session *s, const int16_t gyro_counts[3],
     if (s->pipeline.state == PL_STATE_DONE
         || s->pipeline.state == PL_STATE_ABANDONED) {
         /* The config was accepted once already, so this cannot refuse it. */
-        (void)pl_pipeline_init(&s->pipeline, &s->cfg, &s->calibration);
+        (void)pl_pipeline_init(&s->pipeline, &s->cfg, &s->calibration,
+                               &s->track);
     }
     return produced;
 }

@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "gate.h"
+#include "stroke.h"
 #include "uart_io.h"
 
 static acq_ring *s_ring;
@@ -212,6 +213,7 @@ void stream_service(void)
             s_prev_edge_us = r.edge_us;
             s_have_prev = true;
             rate_feed(index, &r);
+            stroke_feed(index, &r);
         }
         if (s_streaming) {
             emit(&r);
