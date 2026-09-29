@@ -1,0 +1,314 @@
+"""Tests for the plumb_ui component, rendered headlessly.
+
+UI spec: docs/superpowers/specs/2026-09-25-ui-screens-design.md, section 7.
+
+The rule is the project's: check what is DRAWN against what was MEASURED, not
+against a stored picture of itself. Geometry is checked against values derived
+by hand here; pixels are measured from the rendered frame and compared with
+the inputs that produced them.
+"""
+
+import numpy as np
+import pytest
+
+from tools import cbuild, uisnap
+from tools.uisnap import IN_TO_OUT, OUT_TO_IN, STRAIGHT, Result
+
+# The palette after RGB565 quantisation, expanded the way uisnap.to_rgb does.
+BG = np.array([8, 8, 8])            # 0x0A0B0D
+ACCENT = np.array([238, 182, 74])   # 0xE8B44A
+FG = np.array([246, 238, 238])      # 0xF2EFE9
+
+ROWS = np.arange(240)[:, None]      # broadcasts against a (240, 240) mask
+
+
+@pytest.fixture(scope="session", autouse=True)
+def bench():
+    """Build the renderer once, or skip loudly: a skipped UI suite must never
+    read as a pass (the lesson of test_c_port's first version)."""
+    try:
+        return uisnap.executable()
+    except cbuild.CompilerNotFound as missing:
+        message = f"THE UI IS NOT VERIFIED HERE: {missing}"
+        print(f"\n*** {message}")
+        pytest.skip(message)
+
+
+def near(rgb, colour, tolerance=24):
+    return np.all(np.abs(rgb.astype(int) - colour) <= tolerance, axis=-1)
+
+
+def geom(command):
+    return [float(v) for v in uisnap.run([command])[0].split()]
+
+
+# -- geometry, against values derived by hand ---------------------------------
+
+@pytest.mark.parametrize("face, drawn", [
+    (1.8, -9.0),      # open: 5x, counter-clockwise on screen
+    (-1.8, 9.0),      # closed: clockwise
+    (0.0, 0.0),
+    (12.0, -45.0),    # 60 deg drawn would spin the head sideways: clamped
+    (-20.0, 45.0),
+])
+def test_face_rotation_is_five_times_the_angle_and_clamped(face, drawn):
+    assert geom(f"facerot {face}")[0] == pytest.approx(drawn, abs=1e-4)
+
+
+@pytest.mark.parametrize("face, side", [(0.04, 0), (-0.04, 0), (0.06, 1), (-0.06, 2)])
+def test_square_only_below_the_one_decimal_rounding_limit(face, side):
+    """0 square, 1 open, 2 closed. 0.05 is where %.1f stops printing 0.0: a
+    display resolution, not a verdict."""
+    assert geom(f"faceside {face}")[0] == side
+
+
+@pytest.mark.parametrize("back, thru, expect", [
+    (0.70, 0.35, (82.6, 41.3)),    # 118 px/s, fits
+    (1.00, 0.50, (90.0, 45.0)),    # 118 px overruns 90: both scaled by 90/118
+    (0.30, 0.90, (30.0, 90.0)),    # the through bar is the long one here
+])
+def test_tempo_bars_share_one_scale(back, thru, expect):
+    assert geom(f"tempobars {back} {thru}") == pytest.approx(expect, abs=1e-3)
+
+
+@pytest.mark.parametrize("direction, arc, travel, expect", [
+    # h = 4 x 0.006 x 152 / 0.30 = 12.16 px
+    (OUT_TO_IN, 0.006, 0.30, (196.0, 109.84, 44.0, 134.16)),
+    (IN_TO_OUT, 0.006, 0.30, (196.0, 134.16, 44.0, 109.84)),
+    (STRAIGHT, 0.006, 0.30, (196.0, 122.0, 44.0, 122.0)),
+    (OUT_TO_IN, 0.030, 0.30, (196.0, 72.0, 44.0, 172.0)),     # 60.8 clamped to 50
+    (OUT_TO_IN, 0.006, 0.00, (196.0, 122.0, 44.0, 122.0)),    # no travel: flat
+])
+def test_path_ends_are_the_arc_amplified_and_scaled_by_travel(direction, arc, travel, expect):
+    assert geom(f"pathends {direction} {arc} {travel}") == pytest.approx(expect, abs=1e-3)
+
+
+@pytest.mark.parametrize("mps, fraction", [(1.5, 0.5), (0.75, 0.25), (4.0, 1.0), (-1.0, 0.0)])
+def test_speed_ring_fraction(mps, fraction):
+    assert geom(f"speedfrac {mps}")[0] == pytest.approx(fraction, abs=1e-6)
+
+
+# -- the glyph check has to be able to fail ------------------------------------
+
+def test_the_glyph_counter_counts_what_the_font_lacks():
+    """Lowercase is deliberately not in the fonts, so it must count as
+    missing; the strings the screens use must not."""
+    assert uisnap.run(["probe abc"]) == ["3"]
+    assert uisnap.run(["probe 1.8° · —"]) == ["0"]
+
+
+# -- the shell ------------------------------------------------------------------
+
+def test_idle_shows_the_wordmark_and_nothing_else():
+    rgb = uisnap.render(idle=True)
+    ys, _ = np.nonzero(near(rgb, FG))
+    assert len(ys) > 50, "the wordmark should be drawn"
+    assert np.all(np.abs(ys - 120) < 30), "only the wordmark, centred"
+    assert not near(rgb, ACCENT).any(), "no metric, no page dots"
+
+
+def test_navigation_wraps_and_a_new_result_returns_to_face_angle():
+    r = Result().command()
+    assert uisnap.run(["screen", "next", "screen"]) == ["-1", "-1"], \
+        "with no result there is nothing to swipe to"
+    out = uisnap.run([r, "screen", "next", "screen", "next", "next", "next",
+                      "screen", "prev", "screen", r, "screen"])
+    assert out == ["0", "1", "0", "3", "0"]
+
+
+@pytest.mark.parametrize("screen, dot_x", [(0, 102), (1, 114), (2, 126), (3, 138)])
+def test_the_current_page_dot_is_lit(screen, dot_x):
+    rgb = uisnap.render(Result(), screen=screen)
+    ys, xs = np.nonzero(near(rgb, ACCENT) & (ROWS > 224))
+    assert len(xs) > 5
+    assert xs.mean() == pytest.approx(dot_x, abs=2)
+
+
+@pytest.mark.parametrize("screen", [None, 0, 1, 2, 3])
+def test_nothing_is_drawn_outside_the_round_aperture(screen):
+    rgb = uisnap.render(idle=True) if screen is None else uisnap.render(Result(), screen=screen)
+    yy, xx = np.mgrid[0:240, 0:240]
+    outside = np.hypot(xx - 119.5, yy - 119.5) > 121
+    assert np.all(rgb[outside] == BG), "something lit outside the 240 px circle"
+
+
+@pytest.mark.parametrize("screen", [0, 1, 2, 3])
+def test_a_metric_without_a_reading_draws_no_graphic(screen):
+    empty = Result(face=None, backswing_s=None, path_dir=None, speed=None)
+    rgb = uisnap.render(empty, screen=screen)
+    assert not (near(rgb, ACCENT) & (ROWS < 220)).any()
+
+
+# -- face angle -----------------------------------------------------------------
+
+def face_edge_angle(rgb):
+    """The drawn face edge's rotation from vertical, degrees, clockwise on
+    screen, measured from the amber pixels by their principal axis."""
+    ys, xs = np.nonzero(near(rgb, ACCENT) & (ROWS < 170))
+    points = np.column_stack([xs, ys]).astype(float)
+    points -= points.mean(axis=0)
+    _, vectors = np.linalg.eigh(points.T @ points)
+    dx, dy = vectors[:, -1]
+    if dy < 0:
+        dx, dy = -dx, -dy
+    # A vertical edge (0, 1) rotated clockwise by t becomes (-sin t, cos t).
+    return float(np.degrees(np.arctan2(-dx, dy))), len(xs)
+
+
+@pytest.mark.parametrize("face, drawn", [(1.8, -9.0), (-1.8, 9.0), (12.0, -45.0)])
+def test_the_face_edge_is_drawn_at_five_times_the_angle(face, drawn):
+    """Measured from pixels: open turns counter-clockwise, closed clockwise,
+    and a large reading stops at the clamp."""
+    angle, count = face_edge_angle(uisnap.render(Result(face=face), screen=0))
+    assert count > 200
+    assert angle == pytest.approx(drawn, abs=1.0)
+
+
+def test_the_head_swings_from_square():
+    start, _ = face_edge_angle(uisnap.render(Result(face=1.8), screen=0, t_ms=0))
+    early, _ = face_edge_angle(uisnap.render(Result(face=1.8), screen=0, t_ms=100))
+    assert start == pytest.approx(0.0, abs=1.0)
+    assert -4.5 < early < -1.0, "part way toward open, ease-out"
+
+
+# -- tempo ----------------------------------------------------------------------
+
+BACK_ROW, THRU_ROW = 80, 118
+CAP = 15   # a round cap adds width/2 at each end of a 15 px bar
+
+
+def bar(rgb, row):
+    """(drawn length, centre x) of the amber bar on a row, or None."""
+    cols = np.nonzero(near(rgb[row], ACCENT))[0]
+    if len(cols) == 0:
+        return None
+    return cols.max() - cols.min() + 1 - CAP, (cols.max() + cols.min()) / 2
+
+
+def test_bar_lengths_are_the_durations_at_one_scale():
+    rgb = uisnap.render(Result(backswing_s=0.70, downswing_s=0.35), screen=1)
+    (back, _), (thru, _) = bar(rgb, BACK_ROW), bar(rgb, THRU_ROW)
+    assert back == pytest.approx(118 * 0.70, abs=2)
+    assert thru == pytest.approx(118 * 0.35, abs=2)
+    assert back / thru == pytest.approx(2.0, rel=0.06)
+
+
+def test_the_backswing_goes_away_from_the_target():
+    rgb = uisnap.render(Result(), screen=1)
+    assert bar(rgb, BACK_ROW)[1] > 120, "backswing grows right, away from the hole"
+    assert bar(rgb, THRU_ROW)[1] < 120, "through-stroke grows left, toward it"
+
+
+def test_a_long_backswing_shrinks_both_bars_together():
+    rgb = uisnap.render(Result(backswing_s=1.0, downswing_s=0.5), screen=1)
+    assert bar(rgb, BACK_ROW)[0] == pytest.approx(90, abs=2)
+    assert bar(rgb, THRU_ROW)[0] == pytest.approx(45, abs=2)
+
+
+def test_the_backswing_draws_before_the_through_stroke():
+    """Real time: 0.70 s out, then 0.34 s back. The clock resolves 10 ms."""
+    mid_back = uisnap.render(Result(), screen=1, t_ms=350)
+    assert bar(mid_back, BACK_ROW)[0] == pytest.approx(118 * 0.35, abs=6)
+    assert bar(mid_back, THRU_ROW) is None
+    mid_thru = uisnap.render(Result(), screen=1, t_ms=700 + 170)
+    assert bar(mid_thru, BACK_ROW)[0] == pytest.approx(118 * 0.70, abs=2)
+    assert bar(mid_thru, THRU_ROW)[0] == pytest.approx(118 * 0.17, abs=6)
+
+
+# -- path -----------------------------------------------------------------------
+
+def trail(rgb):
+    ys, xs = np.nonzero(near(rgb, ACCENT) & (ROWS < 200))
+    return xs, ys
+
+
+def test_out_to_in_starts_outside_and_finishes_inside():
+    """Outside is up (away from the golfer). The stroke runs right to left.
+    Sign and non-flatness only: the magnitude is pinned by
+    test_path_ends_are_the_arc_amplified_and_scaled_by_travel."""
+    xs, ys = trail(uisnap.render(Result(path_dir=OUT_TO_IN), screen=2))
+    start, finish = ys[xs > 180].mean(), ys[xs < 60].mean()
+    assert start < 122 < finish
+    assert finish - start > 12, "the ends are about 2 x 12.16 px apart vertically"
+
+
+def test_in_to_out_is_the_mirror():
+    xs, ys = trail(uisnap.render(Result(path_dir=IN_TO_OUT), screen=2))
+    assert ys[xs > 180].mean() > 122 > ys[xs < 60].mean()
+
+
+def test_a_straight_path_is_flat():
+    _, ys = trail(uisnap.render(Result(path_dir=STRAIGHT), screen=2))
+    assert np.abs(ys - 122).max() <= 4
+
+
+def test_the_head_travels_right_to_left():
+    def dot_x(t):
+        rgb = uisnap.render(Result(), screen=2, t_ms=t)
+        _, xs = np.nonzero(near(rgb, FG) & (ROWS > 40) & (ROWS < 190))
+        return xs.mean()
+    assert dot_x(300) > dot_x(800)
+
+
+# -- impact speed -----------------------------------------------------------------
+
+def ring_angles(rgb):
+    """Angles of the amber ring pixels, degrees, counter-clockwise from three
+    o'clock (maths convention, y up)."""
+    ys, xs = np.nonzero(near(rgb, ACCENT))
+    r = np.hypot(xs - 119.5, ys - 119.5)
+    keep = (r > 78) & (r < 96)
+    return np.degrees(np.arctan2(-(ys[keep] - 119.5), xs[keep] - 119.5))
+
+
+def test_the_ring_fills_anticlockwise_from_three_oclock():
+    """0.75 m/s is a quarter of the 3.0 m/s full scale: 67.5 of 270 deg."""
+    a = ring_angles(uisnap.render(Result(speed=0.75), screen=3))
+    assert len(a) > 50
+    assert a.min() > -6 and a.max() < 74
+
+
+def test_above_full_scale_the_ring_is_full_and_stops():
+    """270 deg from three o'clock ends at six o'clock: the lower-right quarter
+    stays empty, whatever the speed."""
+    a = ring_angles(uisnap.render(Result(speed=4.0), screen=3))
+    assert not np.any((a > -84) & (a < -6))
+    assert np.any(np.abs(a) > 170), "it reaches nine o'clock"
+
+
+def test_the_ring_fills_over_time():
+    early = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3, t_ms=150)))
+    final = len(ring_angles(uisnap.render(Result(speed=2.0), screen=3)))
+    assert 0 < early < final
+
+
+# -- every string, every screen ---------------------------------------------------
+
+SWEEP = [
+    Result(),
+    Result(face=-0.03, backswing_s=1.4, downswing_s=0.6, path_dir=IN_TO_OUT, speed=3.4),
+    Result(face=12.35, path_dir=STRAIGHT, speed=0.0),
+    Result(face=None, backswing_s=None, path_dir=None, speed=None),
+]
+
+
+def test_every_string_on_every_screen_has_its_glyphs(tmp_path):
+    """A glyph the font lacks renders as nothing at all. Render every screen
+    for results that exercise every label and number format, at mid-motion and
+    at rest, then ask the UI how many glyphs it could not find."""
+    frame = tmp_path / "frame.rgb565"
+    lines = ["idle", "advance 10", f"snap {frame}"]
+    for result in SWEEP:
+        lines.append(result.command())
+        for _ in range(4):
+            lines += ["advance 400", f"snap {frame}", "advance 6000",
+                      f"snap {frame}", "next"]
+    lines.append("missing")
+    assert uisnap.run(lines) == ["0"]
+
+
+def test_the_gallery_writes_a_png_per_case(tmp_path):
+    written = uisnap.gallery(tmp_path)
+    assert len(written) == 10
+    for path in written:
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

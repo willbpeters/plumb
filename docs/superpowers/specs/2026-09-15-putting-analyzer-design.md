@@ -95,8 +95,9 @@ promoting them is a scope decision, not a technical one. None requires new sensi
   forbids the algorithm keying off rotation, not the device reporting it.
 - **Total face rotation through the stroke.** `twist_angle` over a different interval.
 - **Absolute stroke timings.** Backstroke and forward-stroke milliseconds, time to contact, and
-  the pause at the top. The state machine has the indices; only the ratio is currently kept.
-  Timing is this device's best-validated axis.
+  the pause at the top. The state machine has the indices. `StrokeResult` now reports the two
+  phase durations as well as their ratio, for the tempo screen; time to contact and the pause
+  at the top are not kept. Timing is this device's best-validated axis.
 - **Backswing and follow-through length, and their ratio.** Same track machinery as path, but
   far better conditioned: the integration noise that inflates a 6 mm arc is negligible against
   a backswing of a few hundred millimetres. The RATIO is better still, because a pivot-offset
@@ -237,7 +238,9 @@ an alignment stick if they want one.
 ### 4.3 Power budget
 
 Active draw is approximately 70–100 mA (CPU at 240 MHz, backlight on, LVGL rendering, IMU at
-896.8 Hz — the §6.4 rate; this estimate was made at 500 Hz and has not been re-measured). A 400 mAh cell yields roughly 4–5 hours of continuous operation.
+896.8 Hz). A 400 mAh cell yields roughly 4–5 hours of continuous operation. The range was
+estimated when the stroke rate was 500 Hz; what the higher rate adds is not yet measured
+(§6.4, amended).
 
 Because the device sleeps between strokes (§9), realistic practice use is measured in weeks
 rather than hours. The ≥500 strokes-per-charge target in §3 is set against the sleep-enabled
@@ -261,6 +264,14 @@ These are build-time hazards with permanent consequences and are called out expl
    chosen cell. If the board is set to 500 mA, a 400 mAh cell is at 1.25C and a larger cell
    should be used.
 5. **Protection circuit.** Only cells with an integrated PCM are acceptable.
+
+*Amended 2026-09-26.* Item 4 and the charger row in §4.2 name the ETA6096. The Waveshare Rev3
+schematic, read at display bring-up as item 4 asks, shows an **ETA6098**, with R15 = 160 kΩ,
+which the schematic's own table maps to **1 A** charge current. The 400 mAh cell in §4.1 would
+charge at 2.5C, so it fails item 4 as written: fit a cell of at least 1000 mAh, or change R15.
+Read from the schematic's table, not the chip datasheet, and not yet measured on the bench;
+the board's revision still needs confirming against its silkscreen. Recorded in
+`docs/bringup-results.md`.
 
 ---
 
@@ -370,13 +381,48 @@ blending.
 Graphics and sensor acquisition never compete for the same instant, and this is enforced
 structurally:
 
-- **Core 0** — IMU acquisition task. Hardware-timer driven, high priority, writes to a
-  lock-free ring buffer. Nothing else runs on this core during a stroke.
+- **Core 0** — IMU acquisition task. Paced by the IMU's data-ready line, high priority,
+  writes to a lock-free ring buffer. Nothing else runs on this core during a stroke.
+
+  *Amended 2026-09-27.* This previously read "Hardware-timer driven". A timer runs on the
+  ESP32's clock and the IMU on its own, and this unit's IMU runs at 906.86 Hz against a nominal
+  896.8 (§6.4), so a timer at the nominal rate would duplicate or miss about one sample in a
+  hundred. Acquisition is paced by the IMU's own data-ready line instead: DRDY on INT2 →
+  GPIO3, which wakes the task. The part runs in SyncSample mode, whose lock stops a ~500 µs
+  I²C read from being torn by the next sample (datasheet rev A §6.1, §6.3, §13.2). Two
+  register facts that rev A gets wrong or leaves ambiguous are recorded in
+  `docs/bringup-results.md`: INT2 needs `CTRL1` bit 4, which rev A marks reserved, and the
+  CTRL9 handshake needs `CTRL8.bit7`.
+
+  Measured on the firmware skeleton (`firmware/`, 2026-09-27): zero samples lost in 60 s at
+  rest (54,653 samples, 906.93 Hz, counted from the sensor's own sample counter, read by
+  `capture.py` unchanged). With the UI rendering continuously, the median time from DRDY edge
+  to read complete rose from 699 to 926 µs, and its maximum reached 1148 µs, past the 1103 µs
+  sample period. Rendering and streaming together lost 391 of 54,568 samples (0.72%). With
+  the gate below armed, the same load lost none (54,720 samples), with latency p99 707 µs and
+  maximum 820 µs. The rule in the next paragraph is therefore measured, not assumed.
+
+  The cause was then found (`docs/bringup-results.md`, "Where rendering's delay comes from").
+  Rendering on core 1 evicted the I²C driver's code from the cache the two cores share. With
+  the driver run from IRAM, the median read latency while rendering equals the armed median,
+  and streaming while rendering lost 0 of 55,064 samples. What is left is touch polling on the
+  shared bus, which the gate already suspends during a stroke. So the gate is no longer the
+  only thing preventing loss, but it remains what keeps the stroke's timing tail at its floor.
 - **Core 1** — LVGL rendering, UI state, storage writes, power management.
 
 During an armed stroke, the UI renders nothing. The screen displays a result only after
 follow-through completes, when nobody is looking at it anyway. This removes rendering as a
 source of sampling jitter entirely.
+
+**The stroke is armed from BACKSWING through FOLLOWTHROUGH**, and the stroke pipeline itself
+arms and opens the gate. It runs on core 1 as the ring is drained, so its end-of-stroke
+computation never delays a read on core 0.
+
+*Amended 2026-09-28 (Will's decision).* "Armed" was not defined. Arming at ADDRESS would freeze
+the screen, swipes included, whenever the putter was still — lying on a table included —
+because still is what ADDRESS means. Arming at BACKSWING confirmation leaves the stroke's first
+~45 ms (onset, plus the confirmation hold) sampled with the gate open. Since the I²C driver
+moved to IRAM that costs a timing tail, not samples: rendering while streaming lost 0 of 55,064.
 
 ### 6.3 Display configuration
 
@@ -396,6 +442,30 @@ Draw buffers are placed in internal SRAM rather than PSRAM. Published benchmarks
 PSRAM framebuffers on this display use 8 MB octal PSRAM; this board carries 2 MB quad PSRAM at
 roughly half the bandwidth, where internal SRAM wins. Espressif's guidance of 10–25% of screen
 resolution per buffer, double-buffered, is followed.
+
+**LVGL's code runs from flash (`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` off), and its heap is
+32 KB, not 96.**
+
+*Amended 2026-09-28 (Will's decision).* The block above previously set
+`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`. The stroke pipeline needs 157 KB of internal SRAM in
+single precision, 130 KB of it the 3 s path buffer, and only 38.7 KB was free. LVGL held
+211 KB: 112 KB of code copied into IRAM, and a 96 KB static heap that peaked at **9,968 bytes**
+on the board, measured twice with every screen cycled for 20 s. Moving the code to flash and
+the heap to 32 KB (3.2× the peak) left 204 KB free. It did not fit as one block: the S3's
+internal heap is several regions, and the largest was 127–139 KB. The path buffer is therefore
+allocated as separate pieces. The alternative, the path buffer in PSRAM, would have amended
+invariant 7 instead.
+
+The cost, measured on the board with the same instrument before and after (`lv_timer_handler`
+duration while cycling screens, 20 s):
+
+| | Draws | Mean | Max |
+|---|---|---|---|
+| LVGL in IRAM, 96 KB heap | 1,362 | 14.05 ms | 16.32 ms |
+| LVGL in flash, 32 KB heap | 1,290 | 14.83 ms (+5.6%) | 18.30 ms |
+
+Rendering happens only with the gate open (§6.2), never during a stroke, so its speed costs
+result latency and not sampling.
 
 ### 6.4 IMU acquisition
 
@@ -417,6 +487,35 @@ resolution per buffer, double-buffered, is followed.
   rate runs only during the ~1.5 s a stroke is being measured. If the §4.3 power
   budget or the ≥500-strokes-per-charge target in §3 later proves tight, 448.4 Hz
   is a one-constant change back.
+- **The nominal rate is the setting, not the rate. The firmware measures the real rate at
+  startup, and the pipeline integrates with the measured value.**
+
+  *Amended 2026-09-28.* The QMI8658's ODR comes from its own
+  MEMS oscillator. This unit runs **1.12% fast** (906.86–906.94 Hz against 896.8), and a rate
+  error is a scale error in every integrated angle that no filtering removes. It is a property
+  of the part, not the part number, so no shared constant can carry it; a per-unit constant
+  was the alternative and was rejected (Will, 2026-09-27) because the rate also moves:
+
+  | Measured on this unit | Rate |
+  |---|---|
+  | 2026-09-21, imu_stream, 20–60 s captures | 906.86 Hz ± 0.01 |
+  | 2026-09-27, product firmware, 60 s | 906.93 Hz |
+  | 2026-09-28, cold boot | 906.9249 Hz |
+  | 2026-09-28, 30 back-to-back startup measurements, warm | 906.9314 Hz, SD 0.28 ppm, range 1.0 ppm |
+
+  About 75 ppm between days and 7 ppm of warm-up — each negligible against the 11,200 ppm
+  being corrected (100 ppm is 0.001° on a 10° rotation), but proof a stored constant goes
+  stale.
+
+  *How* (`firmware/components/acq/src/rate.c`): a least-squares line through (sample index
+  from the sensor's own counter, DRDY edge time from `esp_timer`) over the first 1,024 samples
+  after boot (~1.13 s), with mispaired edges skipped or rejected. Its statistical error is
+  ~3×10⁻⁵ Hz; the measurement is bounded instead by the oscillator's own wander (1 ppm within
+  a session) and by the **ESP32-S3 crystal `esp_timer` counts against, which it cannot see
+  from inside**. Timed against a PC's clock instead, the same unit read 13.4 ppm higher — two
+  crystals disagreeing by an ordinary amount; that check bounds their difference and cannot
+  say which is right. Total rate uncertainty: **of order 15 ppm**, three orders of magnitude
+  inside what it replaces. Re-checked with `analysis/tools/rate_check.py`.
 - Full-scale ranges: gyro **±256 dps**, accelerometer ±16 g.
 
   *Amended 2026-09-21.* This previously read ±250 dps, which the QMI8658 cannot
@@ -498,38 +597,58 @@ SLEEP → IDLE → ADDRESS → BACKSWING → DOWNSWING → IMPACT → FOLLOWTHRO
 Entering ADDRESS captures two things: the gravity vector `g₀`, and the gyro bias `b` as the
 mean angular rate over the stillness window. Sampling steps to 896.8 Hz on ADDRESS entry.
 
-*Amended 2026-09-23.* Three changes, all found by running the pipeline on strokes the
-synthetic harness had never generated.
+**A stroke that does not reach IMPACT is abandoned**: no result, and the next stroke starts
+from IDLE.
 
-- **The reference is the stillness immediately before takeaway, not the first stillness
-  seen.** `g₀` and `b` were captured once, on ADDRESS entry, and everything after was
-  integrated. A golfer who settles and then re-aims the face had the re-aim reported as face
-  angle — measured, a 2° re-aim read as 1.88° on a square stroke — and a long address
-  integrated bias error for its whole length, so the ~1.5 s window §7.2 relies on became
-  address time plus stroke time (0.34° after a 10 s address, against under 0.04° after 1 s).
-  Now, on backswing confirmation, `g₀` and `b` come from the latest still window ending at
-  or before the back-extrapolated onset, attitude is identity at the end of that window, and
-  the few dozen buffered samples since are replayed through the live integrator. Nothing is
-  integrated in ADDRESS, so its memory is a bounded ring buffer however long the golfer
-  stands there. This is what §8.5's "re-captured during every ADDRESS stillness window"
-  means in practice.
-- **ADDRESS → IDLE** when no still window has been seen for `address_max_gap_s`: the golfer
-  has fidgeted or walked off, and a stroke begun after that has no valid reference.
-- **Any stroke state → IDLE** when the stroke is not finished `stroke_timeout_s` after its
-  onset — a practice stroke with no ball never produces an impact spike, and the machine
-  previously sat in DOWNSWING forever. The one exception is FOLLOWTHROUGH, where impact is
-  already captured: the timeout computes the result rather than discarding it.
+| Exit | Condition | From |
+|---|---|---|
+| ABANDONED (rest) | The stillness window fails the ADDRESS stillness test, then passes it again | ADDRESS, BACKSWING, DOWNSWING |
+| ABANDONED (timeout) | Longer than a maximum stroke duration since backswing onset | BACKSWING, DOWNSWING |
+| DONE, path unavailable | The same timeout, after impact | FOLLOWTHROUGH |
 
-Both new values are placeholders in the same sense as every other threshold here, to be set
-from the Phase 2 corpus.
+*Amended 2026-09-28 (Will's decision).* The state machine above previously only ran forward.
+A real device sees practice strokes with no ball, putters picked up after address, waggles,
+re-grips, and walks to the ball. Each of these starts a stroke that never reaches impact, and
+the machine waited in DOWNSWING indefinitely for an impact that never came, with rendering
+suspended (§6.2).
 
-**Open, and measurable on the board in hand:** §6.4 monitors at 112.1 Hz and steps to 896.8
-on ADDRESS entry. Under the design above, the reference window is the one just before
-takeaway, so it is sampled at stroke rate provided ADDRESS lasts at least the stillness
-window plus the gyro's turn-on settle after the rate change (the driver waits 150 ms). What
-is not known is whether the QMI8658's gyro bias depends on its ODR and filter setting; if it
-does, a bias taken during monitoring must never be used during a stroke. The harness runs
-at stroke rate throughout and cannot see this.
+- **Rest is the ADDRESS test, run in both directions.** The window must first fail the
+  stillness test and then pass it again. Passing it once motion has merely been seen is not
+  enough. At backswing onset the 0.5 s window is still almost entirely address stillness, and
+  the first implementation abandoned every real stroke at its first samples. The window
+  cannot pass again until the motion has slid out of it.
+- **Rest applies at ADDRESS too.** A waggle or re-grip that settles again leaves `g₀`, `b` and
+  the attitude's zero describing a position the golfer has left. Face angle is relative to
+  address (§3.3), and the address that matters is the one the stroke starts from. Stillness
+  at address with no motion never fails the test, and changes nothing.
+- **After impact the stroke is committed.** Face angle, tempo and impact speed are all fixed
+  at impact. A follow-through that never goes quiet, such as walking off still swinging the
+  putter, has no motion end to measure path to. The stroke is therefore finished with path
+  reported unavailable, rather than measured over the walk.
+- **The maximum stroke duration is a threshold, like every other**, and is unnumbered here for
+  the same reason (§7.6).
+
+Tested against continuous synthetic streams (a practice stroke with no impact followed by a
+putt; a waggle, then a putt): the putt's face angle, tempo and speed match ground truth, and
+the C port makes the same decisions as the Python (`analysis/tests/test_session.py`,
+`test_c_session.py`).
+
+*Note, 2026-09-29, not an amendment.* A parallel change (commit `bc2d3d7`) instead re-took
+`g₀` and `b` from the last still window before the back-extrapolated onset, and replayed the
+samples since. The exits above were kept because they are ported and running on the board.
+Two cases it covered are still open under them, each a strict xfail in
+`analysis/tests/test_pipeline.py`:
+
+- **A slow re-aim.** One that never fails the 0.5 s stillness test is never re-captured: 2°
+  over 2 s reads 1.88° on a square stroke. A 2° re-aim over 0.5 s is re-captured correctly.
+- **A long address.** Attitude integrates from first stillness, so the window §7.2 relies on
+  becomes address time plus stroke time: 0.34° worst after a 10 s address, against under
+  0.04° after 1 s.
+
+**Also open, and measurable on the board in hand:** §6.4 monitors at 112.1 Hz and steps to
+896.8 on ADDRESS entry. Whether the QMI8658's gyro bias depends on its ODR and filter setting
+is not known. If it does, a bias taken during monitoring must never be used during a stroke.
+The harness runs at stroke rate throughout and cannot see this.
 
 All detection thresholds referenced above are deliberately left unnumbered here. They are
 derived empirically from the logged stroke corpus during Phase 2 and fixed in the Python
@@ -540,7 +659,8 @@ reintroduce the putter-type priors prohibited in §2.1.
 ### 7.2 Orientation estimation
 
 Orientation is obtained by integrating bias-corrected angular velocity `(ω − b)` from the
-address attitude, which is itself initialized from `g₀`.
+address attitude, which is itself initialized from `g₀`. The integration step is the reciprocal
+of the rate **measured at startup**, not of the nominal ODR (§6.4, amended 2026-09-28).
 
 **Accelerometer correction is heavily down-weighted during the stroke.** This is the single
 most important implementation detail in the pipeline. A stock Madgwick or Mahony filter
@@ -573,6 +693,21 @@ and arc magnitude is reported alongside the classification.
 
 Direction classification is the primary output and is held to a 95% agreement target.
 Arc magnitude is secondary and held to 10%.
+
+*Amended 2026-09-25.* `v_face = ω × r` assumes the sensor does not translate. It does: the
+stroke rotates about the golfer's hands, so the face travels on `r + d`, where `d` runs from
+the pivot to the sensor — 1.4 m against the 0.85 m lever arm, and exactly the 61% arc shortfall
+measured on the harness. `d` is estimated per stroke by least squares, from the velocity form
+of the rigid-body relation, `∫ R a dt = R [ω]ₓ d − v₀`, with `v₀` eliminated by centring and
+the gyro noise's contribution to the design matrix (measured in the ADDRESS stillness window)
+subtracted. It is accumulated across strokes as a per-golfer calibration. The acceleration
+form, `a = ω̇ × d + ω × (ω × d)`, was implemented first and replaced: differentiating the gyro
+put enough noise into the design matrix to bias the least-observed direction of `d`, which on
+an arced putter turned face rotation into sideways path (1.142 of true arc against 1.010 for a
+straight putter at lie 5, 0.28 dps; now 1.010 and 1.006). The same argument applies to §8.4's
+Version 2, which is written in the acceleration form. Arc is measured over the motion only,
+from stroke onset to the start of the follow-through hold, not over the stillness around it.
+Measured on the synthetic harness only; not yet on a real stroke.
 
 ### 7.5 Tempo
 
@@ -734,9 +869,13 @@ Two constraints that invalidate a session if unplanned:
 
 A LittleFS partition occupies the ~13 MB of flash not used by the application.
 
-One stroke at 896.8 Hz × 1.5 s × 6 axes × 2 bytes ≈ **16 KB**, giving capacity for roughly
-**800 raw strokes** on-device. (Recomputed 2026-09-23 for the §6.4 rate amendment; it
-previously read 500 Hz, 9 KB and 1,400.)
+One stroke at 896.8 Hz × 1.5 s × 6 axes × 2 bytes ≈ **16 KB** (1,345 samples × 12 bytes),
+giving capacity for roughly **800 raw strokes** on-device.
+
+*Amended 2026-09-22.* This previously read 500 Hz, ≈9 KB and roughly 1,400 strokes. The
+stroke rate was raised to 896.8 Hz in §6.4 on 2026-09-21 and this estimate was not carried
+along with it. Recomputed at the new rate: 13,000,000 B ÷ 16,142 B ≈ 805 strokes, before
+record headers and filesystem overhead.
 
 Each record carries a header — timestamp, putter profile ID, firmware version, active
 calibration values — followed by raw int16 samples. Raw samples are stored rather than derived

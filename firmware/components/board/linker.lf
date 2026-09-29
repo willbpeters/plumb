@@ -1,0 +1,18 @@
+# The I2C master driver's task-side path in IRAM, not flash.
+#
+# Measured (docs/bringup-results.md, "Where rendering's delay comes from"):
+# with LVGL rendering on core 1, the first I2C transfer of every IMU sample
+# took 158 us longer at the median, and the second only 54 us longer, although
+# it moves 17 bytes to the first's one. That is code gone cold, not a slower
+# bus: rendering evicts the driver from the cache the two cores share, and
+# the first transfer of each sample pays the misses. ESP-IDF keeps only the
+# ISR in IRAM by default.
+[mapping:plumb_i2c_master_iram]
+archive: libesp_driver_i2c.a
+entries:
+    i2c_master (noflash)
+
+[mapping:plumb_i2c_hal_iram]
+archive: libhal.a
+entries:
+    i2c_hal (noflash)

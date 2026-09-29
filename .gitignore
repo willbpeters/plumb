@@ -8,8 +8,17 @@ __pycache__/
 # capture artefacts
 *.npy
 
-# built by analysis/tools/cbuild.py (build.sh is gone; it needed a shell)
+# built by analysis/tools/cbuild.py (the differential test in test_c_port.py)
 firmware/test/*.exe
 firmware/test/obj/
 firmware/test/*.obj
 firmware/test/*.pdb
+
+# built by analysis/tools/cbuild.py build_ui()
+firmware/test/obj-lvgl/
+firmware/test/obj-ui/
+firmware/test/ui-gallery/
+firmware/test/*.rgb565
+
+# arduino-cli build directories (analysis/tools/board_ui.py)
+firmware/bringup-arduino/*/build/

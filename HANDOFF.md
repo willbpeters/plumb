@@ -1,10 +1,9 @@
 # Handoff — Plumb
 
-**Date:** 2026-09-23
+**Date:** 2026-09-29 (parallel line merged; see "Merged 2026-09-29". Firmware skeleton 2026-09-27; the rest as of 2026-09-25)
 **For:** Claude Code, picking this project up cold
-**Supersedes:** the 2026-09-22 handoff. The address reference moved (spec §7.1 amended) and
-defect 6 gained a measurement. Before that, defect 4 was re-measured and its diagnosis CHANGED,
-and defect 6 was new. Read both before touching path.
+**Supersedes:** the 2026-09-21 handoff. What changed since is under "This session
+(2026-09-25)" below; everything else still stands.
 
 ---
 
@@ -12,7 +11,8 @@ and defect 6 was new. Read both before touching path.
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It has been amended repeatedly; see "Spec amendments" below.**
+   of truth. **It carries eleven marked amendments plus one added section (§1.2.1); see "Spec
+   amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
 
@@ -44,16 +44,30 @@ The blocking defect is gone.
 
 | | |
 |---|---|
-| **Synthetic harness** (`analysis/`) | 80 tests. Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. |
+| **Synthetic harness** (`analysis/`) | 151 tests collected on 2026-09-25, all passing (`uv run pytest --co` for today's count). Face angle recovers to **0.0012°** noiseless, 0.0756° at 0.5 dps gyro noise, against a ±1.0° target. Tempo 0.009 against 0.05. **These agree with the generator, not with real strokes — see the note under this table.** |
 | **IMU streaming instrument** | `firmware/bringup-arduino/imu_stream`. Two read paths, selectable at runtime; direct registers is the default. |
 | **§9.1 axes and signs** | **PASS.** Gyro channels map 1:1 to board axes and the triad is right-handed — no remapping needed at the driver boundary. The putter-relative half needs a printed base. |
 | **§9.2 zero dropped samples** | **54720 samples over 60 s, zero lost, zero duplicated, overflow flag clear.** On the direct path. |
 | **§9.3 measured ODR** | **906.86 Hz** at stroke rate, from the sensor's own counter. 1.12% above the 896.8 nominal. Maximum rate still unmeasured. |
-| **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 5. |
-| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`. |
-| **Pivot offset estimation** | `plumb/pivot.py` — closes the 61% path shortfall noiselessly, with a per-golfer calibration that converges over five strokes. 122 tests. |
-| **C port, started** | `firmware/components/plumb/` — `quat.c` ported, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source. **The "bit-identical" claim is toolchain-dependent — see "The compiler" below.** |
+| **§9.4 resting gyro noise** | **Sensor floor 0.22–0.24 dps**, stable across sessions, against a 0.8 dps stillness threshold. Whole-capture σ runs 0.28–0.56 depending on what the room is doing — see open defect 4. |
+| **Host tooling** | `board.py` (one copy of the connect sequence and its hazard), `capture.py`, `rest_noise.py`, `axis_check.py`, `accel_cal.py` (written, not yet run on the board). |
+| **Pivot offset estimation** | `plumb/pivot.py` — velocity form, noise-corrected. Closes the 61% path shortfall; arc now 0.996–1.002 of truth noiselessly for every putter type, and the session mean under 0.28 dps no longer depends on putter type (straight 1.006, arced 1.010 at lie 5). |
+| **C port, started** | `firmware/components/plumb/` — `quat.c` ported and **bit-identical to NumPy** on every operation, and across a whole replayed stroke, proven by a differential harness that runs the same cases through both. Pure C99, builds for host and device from one source, FMA contraction off on both. |
+| **Single precision, whole stroke** | **4.0×10⁻⁵° of face angle at worst** over ~1,850 accumulated steps, against a 1.0° target. A 30 s address hold does not grow it. Safe for the attitude integrator; see `real.h`. |
+| **UI screens, on the host** | `firmware/components/plumb_ui/` — face angle, tempo, path, impact speed and idle, pure LVGL 9.6 (submodule), rendered headlessly and tested by measuring pixels against the inputs: 5× face rotation, tempo bar lengths, path direction, ring sweep, the round aperture, zero missing glyphs. `cd analysis; uv run python -m tools.uisnap` writes PNGs. |
+| **Display and touch, on the board** | `firmware/bringup-arduino/display` — the same screens on the GC9A01 panel, swipe with the touch controller, verified by Will at the board 2026-09-26. `MADCTL` 0x48, inversion on, SPI 80 MHz, full-screen refresh 15.8–20.7 ms per screen. Build and flash with `uv run python -m tools.board_ui flash --port COM4`. Pins and measurements in `docs/bringup-results.md`. |
 | **Screen design** | Five screens designed and reviewed. Decisions recorded below. |
+| **ESP-IDF firmware skeleton** (2026-09-27) | `firmware/` on ESP-IDF v5.5.5, now what the board runs. IMU read on core 0, woken by its own DRDY line (INT2 → GPIO3) in SyncSample mode; UI on core 1; the invariant-8 gate as an atomic flag (`a`/`o` on the console for now). **0 of 54,653 samples lost in 60 s at rest**, through `capture.py` unchanged. **Rendering pushes read latency past the 1103 µs period, and with streaming lost 0.72%; with the gate armed, 0 lost and latency max 820 µs.** No radio code linked, checked on every build. The IMU comes up on 60 of 60 resets. Screens and swipes checked by Will. Build: `firmware/idf.ps1 build`, flash: `firmware/idf.ps1 -p COM4 flash`. Everything in `docs/bringup-results.md`, last section. |
+
+**What the synthetic numbers do and do not show.** The 0.0012° and 0.0756° face-angle figures
+demonstrate that the pipeline agrees with the generator's model of a stroke, not that it is
+accurate on real strokes. The generator and the pipeline share assumptions that a real stroke
+need not honour: impact always falls at the address swing angle (`theta = 0` at impact by
+construction in `trajectory.generate`); the swing is always about body Y; the impact impulse is
+a symmetric Hanning pulse (`sensor.simulate`); and the pivot and sweet spot both lie on the
+shaft axis (`r = (0, 0, -L)`), where spec §8.4 calls for a full lever-arm vector. An error that
+lives in any of those assumptions cannot show up in these numbers. Accuracy on real strokes is
+what the spec's §10 validation study exists to measure.
 
 ### What the direct-register experiment settled
 
@@ -95,32 +109,40 @@ experiment confirmed it. It did.
 3. **Resting noise is 3–4× datasheet-typical.** 0.22–0.28 dps measured against 0.074 predicted
    from 15 mdps/√Hz over the LPF's ~24 Hz bandwidth. Unexplained. Not worth chasing while
    there is 3× margin against the threshold that matters.
-4. **The arc reads 124% of truth under noise, and not for the reason this defect
-   used to give.** It said `ptp(lateral)` collects the extremes of the random walk
-   that integration lays on top of the signal. That is real, and it is the smaller
-   half. Substituting the TRUE pivot offset into the same noisy stroke separates them,
-   at a 5 deg lie and 0.28 dps with the calibration converged:
+4. **Arc under noise — fixed on the harness, both halves.** Two causes, found by oracles
+   (replace one input of the fit with ground truth at a time and see what moves):
 
-   | | arc / truth |
-   |---|---|
-   | truth | 1.000 |
-   | pipeline, zero noise | 1.051 (pivot filter bias, already documented) |
-   | noisy samples, **true** pivot substituted in | 1.096 - this part IS the old defect 4 |
-   | noisy samples, estimated pivot | **1.244** |
+   - **Track wander while the face is still**, mainly through the chord's end point. Fixed by
+     measuring the arc over the motion only.
+   - **The pivot fit's weakest direction.** Not the tilt leak the previous version of this
+     handoff guessed — feeding the fit the *true* acceleration changed nothing (1.137), so the
+     six-unknown fit suggested here would not have helped. It was **errors-in-variables**:
+     the true angular rate alone took the arced putter from 1.142 to 1.049. On the arced putter
+     the rotation axis tilts ~19° off body Y, the weakest direction carries a real 0.18 m of
+     `d`, and noise in the design matrix shrank it by half; the remainder sat off the shaft
+     axis, where face rotation turned it into sideways path. Fixed by fitting in velocity
+     (no derivative, no filter), treating the start velocity as unknown, and subtracting the
+     gyro noise's measured contribution. The reasoning and every intermediate number are in
+     the `pivot.py` docstring.
 
-   So about 60% of the excess belongs to the pivot ESTIMATE, not to the statistic, and
-   no change of statistic reaches it. Measured directly: a quadratic fit of lateral
-   against forward - the smooth fit the last handoff proposed - scores 1.237 against
-   ptp's 1.244. Effectively nothing.
+   Whole pipeline, calibrated pivot, 0.28 dps + 1.5 dps bias, strokes 5–20, arc / truth:
 
-   Pinned by `test_arc_magnitude_meets_the_spec_target_under_noise`, `xfail(strict=True)`
-   at a 5 deg lie and passing at 20 deg. That split IS the finding: the same absolute
-   error is 24% of a 6 mm arc and 8.6% of a 24 mm one, so the device passes its own
-   acceptance test on an arced stroke and fails it on the straight one it most needs to
-   get right. Strict, so it fails the day someone fixes it and forgets to promote it.
+   | putter, lie | start of 2026-09-25 | motion only | + velocity fit |
+   |---|---|---|---|
+   | straight, 5 | 1.041 [0.788, 1.353] | 1.018 [0.856, 1.203] | 1.006 [0.845, 1.190] |
+   | straight, 20 | 1.017 [0.954, 1.088] | 1.010 [0.974, 1.051] | 0.999 [0.962, 1.040] |
+   | arced, 5 | 1.175 [0.927, 1.495] | 1.155 [1.009, 1.348] | 1.010 [0.850, 1.188] |
+   | arced, 20 | 1.070 [1.010, 1.144] | 1.064 [1.028, 1.110] | 0.999 [0.963, 1.040] |
 
-   What remains genuinely attributable to the statistic is the 1.051 -> 1.096 step, and
-   that has not been chased yet.
+   What is left at lie 5 is **spread, not bias**: a 6 mm arc against a ~0.5 mm random walk in
+   the integrated track, per stroke. That is gyro noise through the attitude, and no pivot fit
+   removes it. Session means meet the 10% target; single small-arc strokes do not always.
+
+   **Two assumptions to check on the Phase 2 corpus.** The noise correction's *uncertainty*
+   (which decides whether a direction was observed) is computed for white noise; the board's
+   LPF makes real noise coloured, so the significance test will be optimistic there. And the
+   correction uses the stillness window's noise as the stroke's noise; hand tremor at address
+   or vibration during the stroke would break that.
 
 5. **Environmental vibration, not sensor noise, is what will defeat stillness detection.** Two
    captures an hour apart on an untouched board: the quietest half-second windows agreed to
@@ -129,141 +151,302 @@ experiment confirmed it. It did.
    it. This is not a reason to raise the threshold (invariant 5), it is a reason the Phase 2
    corpus has to be recorded somewhere representative or it answers the wrong question.
 
-6. **The pivot's significance test does not do what its docstring says, and reports
-   0.42 m of offset where the truth is zero.** Five strokes folded into one
-   `PivotCalibration`, true `d = (0, 0, -0.55)` in every row:
+6. **Accelerometer bias inflates the arc — mechanism found, fix built, not yet run on hardware.**
+   Oracles on each use of `g0` separately (0.2 m/s² bias, arced, lie 5; no-bias 1.031, biased
+   1.406):
 
-   | noise | putter | d_x | d_y | d_z | rank |
-   |---|---|---|---|---|---|
-   | 0.00 | straight | -0.0090 | **0.0000** | -0.5681 | 2 |
-   | 0.05 | straight | -0.0091 | **0.4198** | -0.5679 | 3 |
-   | 0.28 | straight | -0.0089 | **-0.0001** | -0.5660 | 2 |
-   | 0.28 | arced | -0.0115 | **0.0832** | -0.5364 | 3 |
+   - **Ground plane** (true gravity there alone → 1.203). `g0` is gravity *plus* bias, so the
+     plane the path is projected onto tilts by bias/g, and the head's ~3 cm of vertical travel
+     leaks into lateral. Per axis this is **body Y — the swing axis, which the stroke cannot
+     observe** (1.296 → 1.066 with the true plane).
+   - **Pivot fit.** `g0` cancels the bias only at the address orientation, leaving
+     `(I − Rᵀ) b`. Body X, +8%.
+   - **Face angle** moves ~0.004°: immune.
 
-   - The 0.42 m row is the exact failure the significance test was written to prevent;
-     its own docstring cites a 1.04 m version of it. It is **not monotonic in noise** -
-     right at 0.00, wrong at 0.05, right again at 0.28 - so it is not a threshold set to
-     the wrong number. `residual_fraction` is 0.045 in every row, so the error bar barely
-     moves with noise and is not tracking what it is meant to track. **Do not tune
-     `SIGNIFICANCE_SIGMAS`** (invariant 5); the quantity it is compared against is wrong.
-   - `d_y` differs between an arced and a straight-faced putter, 0.083 against 0.000.
-     `test_path_arc_barely_depends_on_putter_type` passes anyway, because it bounds the
-     ARC spread at half a millimetre and the arc is insensitive to the component that is
-     wrong - the same near-degeneracy that lets `d_y` be wrong is what stops it
-     mattering. It only became visible because `d` itself got printed. That is the
-     "print measured values, do not just assert them" convention paying out again.
+   Linear and symmetric at small bias: **1.21% of arc per 0.01 m/s² on Y at lie 5**, 0.42% on X,
+   about a quarter of that at lie 20. This board read 9.689 m/s² against 9.81 at rest in
+   bring-up, so its error is in the range that matters. **Requirement: residual offset under
+   ~0.02 m/s² (2 mg)** to keep this under 2.5% of arc at lie 5.
 
-   **The likely fix is deliberately not written.** Constraining `d` to the shaft axis
-   collapses this to one unknown, deletes both spurious components, and removes the
-   eigendecomposition and this significance test entirely. But the synthetic generator
-   PUTS the pivot on the shaft axis, so the harness would score that change against its
-   own assumption - the "test that only checks the code against itself" trap this
-   project has now been bitten by four times. A real shoulder-driven stroke pivots near
-   the base of the neck, which is off-axis. **This one needs the Phase 2 corpus.**
-   Full measurements and the reasoning are in `analysis/plumb/pivot.py`.
+   Not fixable per stroke; the fix is spec §8.1's device calibration, which was specified and
+   never implemented. `plumb/calibration.py` solves offset and gain per axis from resting poses
+   and the pipeline applies it; a simulated tumble of a biased board restores the arc exactly
+   (1.347 → 1.055, the unbiased value). `tools/accel_cal.py` runs it on the board. **Open:** it
+   has not been run, cross-axis misalignment and the offset's temperature drift are not
+   modelled, and the firmware will need the result in NVS and in each record's header (§11).
 
-   **Update 2026-09-23 — one cause of the wrong error bar found; fixing it alone is
-   worse.** The significance test counts every sample as independent, but the 2 Hz
-   low-pass correlates them over ~143 samples, so the error bars are ~12x too small.
-   Correcting the count removes the spurious cross-shaft component on a straight putter
-   and damages the arced one, noiselessly (d_z -0.557 -> -0.504), because the directions
-   it drops are eigenvectors that mix the body axes. Not applied. Table in `pivot.py`.
-   Also: after the address change below, the 0.42 m row reads 0.65 m — same defect,
-   sensitive to small changes upstream.
+7. **The address reference is still taken from the first stillness in two cases.** Found by a
+   parallel line of work (`bc2d3d7`), then measured again on this code at the merge. Both are
+   `xfail(strict=True)` in `test_pipeline.py`, under "The address reference":
 
-**Resolved 2026-09-23:** three state-machine defects outside anything the harness had ever
-generated — every synthetic stroke had exactly 1 s of perfect stillness and ended in impact.
-Spec §7.1 amended; tests in `test_pipeline.py` under "Address reference and abandoned strokes".
+   - **A slow re-aim.** The rest test re-captures address after a waggle only if the stillness
+     window fails and then passes again. A re-aim slow enough never to fail the window is
+     counted as face angle: 2° over 2 s reads **1.88°** on a square stroke. The same re-aim
+     over 0.5 s is re-captured and reads 0.00 (that test passes).
+   - **A long address.** Attitude integrates from first stillness, so a 10 s address
+     integrates bias error for ~11.5 s where invariant 4 assumes ~1.5: **0.34°** worst over
+     five seeds at 0.28 dps with a bias walk, against under 0.04° after a 1 s address.
 
-- *Re-aiming the face after settling was reported as face angle.* The address reference was
-  captured once, at first stillness; a 2° re-aim read as 1.88° on a square stroke. The
-  reference now comes from the still window just before the back-extrapolated onset, and the
-  samples since are replayed. Nothing is integrated in ADDRESS any more.
-- *A long address widened the integration window* that invariant 4 relies on: 0.34° worst
-  after a 10 s address against under 0.04° after 1 s. Now independent of address length.
-  Side effect worth knowing: at a 1 s address, 0.28 dps, 60 seeds, face-angle RMS went
-  from 0.023° to 0.016°, because the address period's noise is no longer integrated.
-  Noiseless face (0.00116°), tempo (0.00900) and arc ratios are unchanged to the digits
-  printed; defect 4's ratios moved 1.244 -> 1.235 (5°) and 1.086 -> 1.091 (20°).
-- *No exit from a stroke that never struck a ball*, or from an ADDRESS the golfer walked away
-  from — the machine sat there forever with unbounded buffers. New `stroke_timeout_s` and
-  `address_max_gap_s` in `Thresholds`, **placeholders like every other value there**, for
-  Phase 2 to set.
+   `bc2d3d7`'s `_rebase` fixed both in Python. At takeaway it re-took `g₀` and `b` from the
+   last still window before the back-extrapolated onset and replayed the buffered samples
+   since, so nothing is integrated in ADDRESS. It was not kept, because it conflicts with the
+   rest-test design that is ported to C and running on the board. Reconciling the two and
+   porting the result is its own piece of work. It changes when the reference is taken, so
+   it is Will's call.
 
-Also fixed: `noise_breakdown_dps` could report a level above an earlier failure; stale
-500 Hz / noise-floor / "bit-identical" comments; the pivot filter corner was defined twice.
-Suite: **139 passed, 1 xfailed**, C differential tests running (not skipped).
+   Separately, and measurable on the board in hand: §6.4 steps the ODR from 112.1 to 896.8 Hz
+   on ADDRESS entry. It is not known whether the QMI8658's gyro bias depends on ODR and filter
+   setting. If it does, a bias taken while monitoring must never reach a stroke.
 
-**Open design question, measurable now:** §6.4 monitors at 112.1 Hz and steps to 896.8 on
-ADDRESS entry. Does the QMI8658's gyro bias depend on ODR/filter setting? If so, a bias taken
-while monitoring must never reach a stroke. Recorded in the §7.1 amendment.
-
-**Resolved 2026-09-22:** the differential test was silently skipping for want of a compiler
-(see "The compiler"), and the diagnosis of defect 4 was wrong. Suite: **133 passed, 1 xfailed**.
-
-**Resolved 2026-09-21:** the FIFO sample loss (routed around), the corrupted FIFO reads
+**Resolved on 2026-09-21:** the FIFO sample loss (routed around), the corrupted FIFO reads
 (quantified, and no longer in the signal path), the intermittent init (soft reset + the
 datasheet's 15 ms, not the 150 ms it was first read as), and a capture defect that could
 silently splice stale frames into a measurement.
 
+### This session (2026-09-25)
+
+Commits from `cbe265b` on. Every code change came with a test that
+compares against ground truth.
+
+- **The accelerometer correction had the wrong sign** — positive feedback. `predicted × measured`
+  turned the attitude *away* from gravity; a 2° tilt went to 87° in 2 s at a gain of 2.0. The
+  stock gain's ~50 s time constant hid it (2.000° → 2.082°). Now `measured × predicted`.
+- **Face rotation could time the transition** (invariant 1). The transition was the sign flip
+  of the largest body axis at backswing entry, including Z, the face-rotation axis, and entry
+  is at ~12.5 dps of swing, so an early-opening face could win: a 100 ms shift, all of it into
+  tempo. Now the swing perpendicular to the shaft, projected on the backswing direction. The
+  "25-sample" dominant-axis average also only ever saw one sample.
+- **FMA contraction is off** on host and device, without which the bit-for-bit claim says
+  nothing about the ESP32-S3.
+- **Arc is measured over the motion only** (open defect 4, first half).
+- **The pivot is fitted in velocity, corrected for gyro noise** (open defect 4, second half).
+  The arced putter's arc went from 1.142 to 1.010 of truth at lie 5, level with the straight
+  putter. Spec §7.4 amended; it still described `v = ω × r`.
+- **Single precision measured across a whole stroke** (next task 1, its open question).
+- **Corrected, not changed:** the pivot docstring claimed its filtering left the equation
+  exact; it does not, and filtering the matrix instead was measured and is not better at the
+  board's noise floor (table in `pivot.py`).
+
+### Merged 2026-09-29
+
+Five commits made in parallel from `c637ee7` (`6372ce3`..`bc2d3d7`) were merged into this
+line. Code: the remote side won `pipeline.py` and `pivot.py`, which are the versions ported to
+C. Open defect 7 is what that left open. Kept from the parallel line:
+
+- `docs/superpowers/specs/2026-09-22-competitive-feature-review-design.md`: a review against
+  Plus Putt Path, and a decision register for the metrics the pipeline computes and discards.
+  Parent spec §1.2 and §1.2.1 carry its amendments.
+- `docs/superpowers/specs/2026-09-22-hardware-purchasing-spec.md`: see the LiPo item under
+  "Blocked on Will".
+- `sweep.noise_breakdown_dps` now reports the last level before the first failure, not the
+  highest passing level.
+
 ---
 
-## ▸ Next task
+## ▸ Next task — pick one
 
-**Phase 2 — the logged corpus — is now the only item that is not waiting on itself.** That
-changed this session. Both remaining software tasks turned out to be blocked on data:
-`pipeline.c` on thresholds that do not exist, and `pivot.c` on a defect whose fix cannot be
-chosen without real strokes (defect 6). The three options below are kept in the old order so
-the reasoning is visible, but 3 is the one to do.
+Nothing is blocked on code any more. In order of what unblocks the most:
 
-**1. Continue the C port — but `pipeline.c` is premature.** `quat.c` is done and the
-infrastructure round it works, which was the risky part. What is left is `pivot.c` and then
-`pipeline.c`.
+**0. What the firmware skeleton leaves (2026-09-27).** `firmware/` is the product build now.
+Still to do on it, in order:
 
-`pipeline.c` should NOT be started yet. Every detection threshold in it comes from the logged
-corpus (invariant 5), that corpus does not exist, and the values in `Thresholds` say in their
-own docstring that they are placeholders for the synthetic harness. Porting the state machine
-now means translating code built round numbers that are still blank, and re-translating it
-after Phase 2.
+- **Rendering's delay: found and fixed (2026-09-27).** Rendering evicted the I²C driver from the
+  shared cache; the driver now runs from IRAM (`board/linker.lf`). Streaming while animating
+  went from 0.72% lost to 0 of 55,064. The remaining tail is touch polling on the shared bus,
+  which the gate already suspends during strokes. The UART interrupt was never the cause.
+  `docs/bringup-results.md`, last section.
+- **Samples lost in the first second after boot** (10 of 12 boots, usually 1, once 24). The
+  suspect is the touch controller's init holding the bus; untested. It matters once a wake
+  (§9) sits right before a stroke.
+- **Before §11 logging:** flash writes disable the cache for both cores. The I²C driver is now in
+  IRAM, but the acquisition task, `qmi8658.c` and the GPIO ISR dispatch are not. Anything that
+  writes flash while the IMU runs needs those in IRAM too, measured with `j`.
+- Fonts to PSRAM (invariant 7 permits it; they are in flash-mapped rodata now), the final
+  rotation once the base fixes how the board sits, and the 120 MHz flash question (spec §6.3
+  asks for it; not attempted, reasons in the skeleton spec).
 
-`pivot.c` is not blocked on thresholds, but it is now blocked on something else: open defect 6
-says the estimator it would port has a spurious component in it, and the likely fix deletes the
-eigendecomposition that is most of the porting work. **Do not port `pivot.py` until defect 6 is
-resolved.**
+**1. The pipeline runs on the board (2026-09-28). What it needs now is a real stroke — yours.**
 
-So the honest state of next-task 1 is: the part that could be done has been, and the rest waits
-on data.
+> **Wired.** `firmware/main/stroke.c` owns a `pl_session` on the app task (core 1, spec §6.2),
+> fed every new sample from the ring drain once the startup rate is measured, and drives the
+> render gate: armed BACKSWING → FOLLOWTHROUGH (your call). Results go to the screens and the
+> console (`# stroke N: face … rel. address, tempo …, speed …, path …, lost in stroke N,
+> compute N us`); abandons print why. `?` shows state, counts, step cost, heap.
+> Placeholders — all thresholds and the 0.85 m lever arm — live in one file,
+> `main/stroke_config.c`, and `tests/test_stroke_config.py` fails if they drift from the
+> Python's.
+>
+> **Memory, measured and fixed (your call: trim LVGL).** The 157 KB pipeline did not fit —
+> 38.7 KB free. LVGL held 211 KB: 112 KB of code in IRAM and a 96 KB heap that peaked at
+> 9,968 B. Code to flash + heap to 32 KB → 204 KB free, but the largest block was 127–139 KB,
+> so the path ring is now caller-supplied storage (`pl_track`) allocated in three pieces.
+> After: **58.8 KB internal free**. Rendering 14.05 → 14.83 ms mean (+5.6%). Spec §6.3 amended.
+>
+> **Precision is settled by memory:** in double the path ring alone is 261 KB and cannot fit.
+> The device builds single (`PLUMB_DOUBLE` CMake option, PUBLIC define so `main` and the
+> component agree on `pl_real`). Single's cost is measured: 3.3×10⁻⁵° of face angle.
+>
+> **At rest on the board:** state ADDRESS, step mean **272 µs**, max 743 µs against the
+> 1,103 µs period — ~25% of core 1, mostly the rest test's per-sample window std. 0 samples
+> lost after boot (1 during boot, the known defect).
+>
+> **Blocked on you — the bench check (10 minutes, board on USB):**
+> 1. Hold it still ~1 s (ADDRESS), swing it like a short putt, **tap it hard on the table at
+>    the bottom** (the impact trigger is 100 m/s² ≈ 10 g), hold still ~0.5 s. Expect
+>    `# stroke 1: …` and the result screens. Watch `lost in stroke` (should be 0) and
+>    `compute` (end-of-stroke cost; §3 target is 500 ms latency).
+> 2. Swing without the tap, then put it down: expect `# stroke abandoned (rest) from DOWNSWING`.
+> 3. **The face-angle sign.** Open the face (turn the toe away) during a stroke and check the
+>    screen says OPEN. `FACE_OPEN_SIGN` in `main/ui_port.c` is **derived for a right-handed
+>    golfer, not measured**; nothing on the device knows handedness yet.
+> 4. Swipe between screens at rest — the gate should leave touch alone until a backswing.
+>
+> **Not done:** the impact spike on a real strike (the harness's is a 60 g Hanning pulse);
+> a gap in samples mid-stroke is counted and reported, not corrected; the §11 log.
 
-### The compiler
+> **`pipeline.c` done (2026-09-28).** `analysis/tests/test_c_pipeline.py`, 10 tests. The C is
+> fed the simulator's int16 counts and compared at every stage over 14 strokes (three putters,
+> lie 5/20, two face angles, clean and noisy, two tempos), plus a calibrated session, an
+> accelerometer calibration, and the 906.86 Hz rate:
+>
+> | | double vs NumPy | float vs NumPy |
+> |---|---|---|
+> | bias, g0, every stroke boundary, attitude at impact | **0 exactly** | no boundary moved |
+> | face angle | **0 exactly** | 3.3×10⁻⁵° |
+> | tempo ratio | **0 exactly** | 8.7×10⁻⁸ |
+> | arc, travel | 3×10⁻¹⁵ m | 0.035%, 0.006% |
+> | path direction | identical | identical |
+>
+> This answers what `real.h` left open — rates formed in float and everything the pipeline
+> adds on top of the integrator. **Single precision costs nothing measurable**; the
+> precision call is still yours, but the evidence is now whole-pipeline.
+>
+> The arc's 3×10⁻¹⁵ is the only place the C departs from the Python on purpose: it sums
+> the track from the window start, because it keeps a ring rather than the whole list.
+>
+> Also added to the Python first, tests against ground truth: `Pipeline(sample_rate_hz=)`
+> (your 2026-09-27 decision; a wrong rate scales face angle by exactly the rate ratio and
+> leaves tempo alone), and `StrokeResult.backswing_s / downswing_s / path_travel_m`, which the
+> UI already draws from.
+>
+> **Track ring size — DECIDED by Will 2026-09-28: keep 3 s.** `PL_PIPELINE_TRACK_MAX` = 2720 samples (3.0 s at
+> 906.86 Hz). In float **one `pl_pipeline` is 156,640 bytes, 130,560 of them the ring** —
+> internal SRAM, since invariant 7 keeps PSRAM for fonts and images. Sized from the harness:
+> the slowest strokes generated (1.0 s backswing, tempo 1.5) need 2318 samples from onset to
+> DONE. A stroke that outruns the ring reports **path unavailable**; face angle and tempo
+> never touch it (tested). Reductions if SRAM is tight: store the ground-plane projection only
+> (8 floats a sample, not 12 — a Python change first), or assume the pivot is on the shaft
+> axis (collapses the matrix to a vector, at the cost of an assumption). Real stroke lengths
+> come from the Phase 2 corpus; the synthetic generator's are a guess.
+>
+> **Other behaviour the Python did not need:** an impact spike longer than
+> `PL_PIPELINE_IMPACT_MAX` (64 samples, ~70 ms — a putt's is ~4) reports face angle
+> unavailable but keeps tempo; a stillness window that does not fit its ring is refused at
+> init rather than shortened. No threshold has a value anywhere in the C (invariant 5); they
+> arrive in `pl_pipeline_config`.
+>
+> **Impact speed — done, Python then C (2026-09-28).** |ω × (d + r)|: the face as a point of
+> the rigid body rotating about the fitted pivot. Taken at the last downswing sample before
+> the impact spike, because from the spike on the gyro reads the collision too. **Unavailable
+> without a pivot solution** — the lever arm alone reads 39% low (0.85 against ~1.4 m), and
+> that is not a measurement. Against the generator's true face speed:
+>
+> | | |
+> |---|---|
+> | Noiseless, 9 strokes, 0.49–3.29 m/s | ≤ 0.16% |
+> | Sample-before-impact against the true impact instant | ≤ 0.02% (the definition's cost) |
+> | 0.28 dps + 1.5 dps bias, 10 strokes | mean +0.04%, worst 0.70% |
+> | Across putter types | < 0.2% (invariant 1) |
+> | C against the Python, double / float | 2.7×10⁻¹⁵ m/s / 5.9×10⁻⁶ relative |
+>
+> **Your call: the spec has no accuracy target for impact speed.** §1.2.1 makes it a
+> first-build metric, but §3's table has no row for it, so nothing says what the §10 study
+> should hold it to. The harness numbers above are the evidence to set one from; the real
+> uncertainty will be larger (real strokes, a real pivot, a real lever-arm measurement —
+> the lever arm is a per-putter input, and an error in it is a proportional error in speed).
+>
+> **Startup rate measurement — done, on the board (2026-09-28).** `acq/rate.c`: least squares
+> of DRDY edge time (`esp_timer`) against the sensor's own sample index over the first 1,024
+> samples after boot; records where the task fell behind are skipped, mispaired edges
+> rejected at 5 robust sigmas. 8 host tests against generated ground truth, including that the
+> reported error is honest (z SD 1.00 over 60 runs). On the board: **906.9314 Hz, 30
+> back-to-back measurements within 1.0 ppm** (SD 0.28 ppm — 8× the fit's own error, because
+> the oscillator wanders smoothly, not because the fit is wrong). **Against the PC's clock the
+> same unit reads 13.4 ppm higher** — the two crystals' difference; it bounds the systematic
+> term, it cannot say which clock is right. 906.86 (09-21) → 906.93 (09-27) → 906.925 cold /
+> 906.931 warm (09-28): the case for measuring rather than storing. Printed at boot and by
+> `?`; `m` re-measures; `stream_sample_rate()` returns it. Spec §6.4 amended, §7.2 points at
+> it. `uv run python -m tools.rate_check --port COM4` repeats the whole check.
+>
 
-`real.h` records the double-precision column as exactly `0.000e+00`. **That is MSVC's answer,
-not a property of the port.** This machine has no MSVC, no LLVM and no MinGW, so the
-differential test was skipping entirely — the failure mode commit c637ee7 exists to prevent,
-arriving by a different door. Fixed by adding `ziglang` (a self-contained clang toolchain on
-PyPI) as a dev dependency and teaching `tools/cbuild.py` to find it; `uv sync` now brings a
-compiler with it and the skip is unreachable in normal use.
+> **`pivot.c` done (2026-09-28).** `analysis/tests/test_c_pivot.py`,
+> 9 tests, both precisions, checked to have run rather than skipped:
+>
+> | | double | float |
+> |---|---|---|
+> | normal equations vs NumPy | 3.4×10⁻¹⁶ relative | — |
+> | offset vs NumPy, per stroke | 2.4×10⁻¹³ m | ≤ 0.53 mm |
+> | offset vs NumPy, 10-stroke session | < 10⁻⁹ m | 0.11 mm |
+> | 10 arced strokes at 0.28 dps, vs truth | 4.50 mm | — |
+>
+> Plus ground truth on the rank-deficient single-axis swing, the straight putter's
+> noise-only direction, and the no-estimate cases. The solve uses Jacobi rotations in place
+> of LAPACK's `eigh`, so it is compared on offset, rank and residual rather than bit for bit.
+>> **Welford was not adopted.** The old port note asked for it; measured in NumPy float32
+> first, running sums cost ≤ 0.17 mm of offset and Welford ≤ 0.10 mm. The port keeps the
+> Python's arithmetic. `pivot.py`'s port note now says so.
+>
+> **Found by the port, recorded, not fixed — Will's call if it ever matters.** The design
+> energy is Σ(|ω|²I − ωωᵀ), so for a single-axis swing the two directions perpendicular to
+> the axis carry *exactly* equal energy (204.9053 against 204.9053). The eigenvectors in that
+> plane are an arbitrary basis and the per-direction significance test depends on the basis,
+> so the reported **rank** there is not a stable quantity: float dropped a 0.55 mm component
+> that double kept, once in twelve strokes. The offset moved 0.53 mm. Nothing consumes rank
+> except reporting. A basis-free test would judge the degenerate plane as a whole.
+>
 
-Built with `zig cc`, the same cases come back at **2.2e-16** rather than zero — one ulp,
-consistent with clang contracting `a*b + c*d` into an FMA where MSVC does not. Not chased
-further, because one part in 10^16 is meaningless against a 0.22 dps sensor floor. Worth knowing
-only so that the next person does not read a non-zero number as a translation error. If the
-sharp "exactly zero means no translation error" signal is wanted back, `-ffp-contract=off`
-is the flag; it compiles clean, and whether it restores the zero was not measured.
+```
+cd analysis; uv run pytest tests/test_c_port.py -q -s
+```
 
-**2. The 906.86 Hz decision — Will's call, and it needs making before the port.** A 1.12% scale
+builds the harness and prints the worst difference per operation. It came back **0.000e+00 on
+every quaternion operation in double precision** — the C reproduces NumPy bit for bit, because
+the translation keeps the arithmetic in the Python's order. Floating-point addition is not
+associative, so tidying an expression while translating changes the last bits and turns a clean
+diff into an investigation. Keep doing it that way.
+
+Two things to know before continuing:
+
+- **The precision decision now has its whole-stroke number, and it favours single.** See
+  `real.h`. About one ulp per operation, and **at most 4.0×10⁻⁵° of face angle across a whole
+  replayed stroke** — ~25,000× inside the 1.0° target — with no growth over a 30 s address.
+  Doubles are software-emulated on the ESP32-S3 at 896.8 Hz, so single is the likely choice;
+  it is still Will's call. **Now measured on the whole pipeline too** (2026-09-28, above):
+  3.3×10⁻⁵° of face angle, no stroke boundary moved.
+- **The build lives in `analysis/tools/cbuild.py`, not in a shell script.** It discovers the
+  toolchain itself — cc/gcc/clang, else MSVC, which is driven directly because `vcvars64.bat`
+  hangs in Git Bash here. It was a shell script for about an hour, and in that hour running
+  the suite from PowerShell skipped all ten cases silently and read as a pass, because `sh`
+  was not on PATH. Verify the port test actually RAN, not merely that it was green.
+
+**2. The 906.86 Hz decision — DECIDED 2026-09-27: measure at startup** (next task 1, step 1).
+The reasoning that led there, kept for the record: a 1.12% scale
 error goes into every integrated angle and no filtering removes it. `SAMPLE_RATE_HZ` is
 deliberately left at nominal 896.8, because 906.86 is *this board's* oscillator and baking one
 unit's calibration into a shared constant trades a known error for a hidden one. The real
 options: per-unit calibration, or firmware that measures its own rate at startup — which it can
 now do in about ten lines, since the counter exists and works.
 
-**3. Phase 2, the logged corpus — DO THIS ONE.** The instrument is trustworthy enough to log
-strokes with. Capture motion windows, not strokes — see §2.1 of the instrument spec for why that
-ordering matters, and invariant 5 for why thresholds cannot come first.
+**Also ready to run:** the accelerometer tumble (open defect 6), which needs a hand and about
+five minutes — see "Blocked on Will".
 
-It now unblocks three separate things rather than one: the `Thresholds` values, the choice
-between a 3-DOF and a shaft-constrained pivot (defect 6), and with it `pivot.c` and
-`pipeline.c`. It also needs the board, which the last two sessions of software work did not.
+**Port note for `pivot.c`:** the centring is done from running sums, which cancels. Fine in
+double; in single precision the weakest eigenvalue (~0.07 against sums of ~300) keeps about four
+significant digits. Use running means (Welford), and measure it with the harness.
+
+**3. Phase 2, the logged corpus.** The instrument is trustworthy enough to log strokes with.
+Capture motion windows, not strokes — see §2.1 of the instrument spec for why that ordering
+matters, and invariant 5 for why thresholds cannot come first.
 
 The tap test (§5.5) is still the highest-risk unknown in the project, and it is still blocked on
 a printed base *and* on sampling above 1 kHz. The untried option for the second: 1793.6 Hz with
@@ -274,15 +457,25 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-All came from reading the datasheet, measuring the hardware, or running the harness. Each is recorded in the
-spec with its reasoning.
+Eleven amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+one new section. The four to §6.4 came from reading the datasheet or measuring the hardware;
+the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
+records what the path code has actually done since the pivot estimate went in; the §4.4 one
+records the charger the schematic actually shows; the §6.2 one records data-ready pacing.
 
 | § | Was | Now | Why |
 |---|---|---|---|
 | 6.4 | gyro ±250 dps | **±256 dps** | ±250 does not exist on this part. Its table is powers of two. Converting at 250 while configured at 256 puts a 2.4% scale error into every integrated angle. |
 | 6.4 | 500 Hz stroke, 100 Hz monitor | **896.8 Hz, 112.1 Hz** | Neither exists. ODR steps derive from the gyro's natural frequency. 896.8 chosen over 448.4 because tempo is the binding constraint and its error halved. |
 | 6.4 | "FIFO batching is mandatory" | **direct register polling** | Measured: the FIFO loses 21.9% of samples and cannot count what it loses; direct polling loses none. The original bus-cost argument confused transaction overhead with data volume. |
-| 7.1 | reference captured on ADDRESS entry; no exits | **reference from stillness just before onset; ADDRESS and stroke timeouts** | A face re-aim during address was counted as face angle, a long address widened the drift window, and a stroke with no impact never ended. Measured; see Open defects, "Resolved 2026-09-23". |
+| 11 | ≈9 KB per stroke, ~1,400 strokes | **≈16 KB, ~800 strokes** | Storage estimate was still computed at 500 Hz. Recomputed at 896.8 Hz: 1,345 samples × 12 B against the ~13 MB partition, before headers. Amended 2026-09-22. |
+| 7.4 | `v_face = ω × r` | **`r + d`, `d` fitted per stroke and per golfer** | The sensor translates; the stroke rotates about the hands. The code has estimated `d` since `9516b6f` without a spec amendment; recorded 2026-09-25 with the velocity-form fit that replaced the acceleration form. |
+| 4.4 | ETA6096, ≤ 800 mA | **ETA6098, 1 A** (R15 = 160 kΩ) | Read from the Rev3 schematic at display bring-up, as §4.4 asks. 2.5C on the planned 400 mAh cell. Not yet bench-measured. Amended 2026-09-26. |
+| 6.2 | "hardware-timer driven" | **paced by the IMU's DRDY line** | A timer on the ESP32's clock drifts against the IMU's 906.86 Hz and would duplicate or miss ~1 sample in 100. Amended 2026-09-27 with the skeleton's loss and jitter measurements. |
+| 6.4 | 896.8 Hz, used as the rate | **the rate measured at startup** | This unit runs 1.12% fast and moves ~75 ppm between days; a constant goes stale. Measured to ~15 ppm (crystal-bound). Will's decision 2026-09-27, amended 2026-09-28 with the board measurements. |
+| 7.1 | forward only | **ABANDONED on rest or timeout before impact; DONE without path on timeout after** | A practice stroke waited in DOWNSWING forever with rendering suspended. Rest = the address test failing then passing again. Will's decision, amended 2026-09-28. |
+| 6.3 | LVGL code in IRAM, 96 KB heap | **LVGL in flash, 32 KB heap** | The stroke pipeline needed the internal SRAM; LVGL's heap peaked at 9,968 B. Rendering +5.6%. Amended 2026-09-28, Will's decision. |
+| 6.2 | "armed" undefined | **armed BACKSWING → FOLLOWTHROUGH, by the pipeline** | Arming at ADDRESS would freeze swipes whenever the putter lay still. Amended 2026-09-28, Will's decision. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.
@@ -302,6 +495,12 @@ evidence.
 - **CTRL1.ADDR_AI defaults to 0**, so burst reads do not advance the register address. Correct
   for FIFO_DATA by accident; silently wrong for the output registers, where it would have
   returned twelve copies of AX_L and a standard deviation that meant nothing.
+- **INT2 needs `CTRL1` bit 4, which rev A marks reserved** (2026-09-27). Without it no DRDY edge
+  ever arrives.
+- **The CTRL9 handshake takes 3253 µs**, measured on every boot; imu_stream's 50-read budget
+  was ~3.2 ms and failed on 7 to 11 boots in 40 on the new firmware. Now bounded by time.
+- **A reset mid-read leaves the IMU holding SDA.** ESP-IDF's bus clear does not free it; nine
+  clocks and a STOP, before the driver takes the pins, does (`board/src/i2c_bus.c`).
 - **Turn-on time is two numbers.** System Turn On Time is 15 ms (initialisation, during which
   the datasheet says not to write at all); Gyro Turn On Time is 150 ms + 3/ODR (before the
   output means anything). The earlier handoff conflated them.
@@ -340,12 +539,25 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
 
 ## Blocked on Will
 
+- **Run the accelerometer tumble.** `cd analysis; uv run python -m tools.accel_cal --port COM4
+  --gravity 9.800` — six faces, then two poses of any kind, board still each time. It prints
+  offset and gain and saves the raw pose means under `data/calibration/`. This says whether
+  open defect 6 is a 2% problem or a 25% one on this unit. (9.800 is for Sacramento; pass local
+  g if elsewhere.)
+
 - **Print a base.** The tap test (§5.5) is still the highest-risk unknown in the project and it
   has not started. If the mount resonates below ~200 Hz, §5.5's escalation runs *before* any
   further firmware work.
 - **A LiPo with an MX1.25 connector** — §4.4. Most hobby cells ship JST-PH, which will not mate.
-  Meter the polarity before first connection.
-- **The 906.86 Hz decision.** See next task 2.
+  Meter the polarity before first connection. **And not 400 mAh:** the schematic shows the
+  charger set to **1 A** (ETA6098, R15 = 160 kΩ), which is 2.5C on the spec's 400 mAh cell.
+  Fit at least 1000 mAh, or change R15; confirm the board is Rev3 from its silkscreen first.
+  Spec §4.4 amended 2026-09-26; details in `docs/bringup-results.md`. **But a ≥1000 mAh cell
+  does not fit the Ø37.5 mm puck.** `docs/superpowers/specs/2026-09-22-hardware-purchasing-spec.md`
+  §1 reached the same 1 A finding independently and works through the options: rework R15,
+  a bigger puck, or a cell rated for 2.5C charge. Read it before buying.
+- ~~**The 906.86 Hz decision.**~~ **Decided 2026-09-27:** measure the rate at startup. See
+  next task 1.
 
 **Resolved:** the blade putter's grip has an **open butt cap**, so the §5.1 barbed-taper base
 works as specified. No step-drilling needed.
@@ -354,7 +566,15 @@ works as specified. No step-drilling needed.
 
 ## Working with the board
 
-It answers on **COM4** (CH343 USB-serial bridge, VID 0x1A86, PID 0x55D3). From the repo root:
+It answers on **COM4** (CH343 USB-serial bridge, VID 0x1A86, PID 0x55D3).
+
+**It runs the product firmware now** (since 2026-09-27). From `firmware/` in PowerShell:
+`./idf.ps1 build`, `./idf.ps1 -p COM4 flash`. Console at 921600: `s` stream, `b`/`c` format,
+`a`/`o` arm/open the gate, `x` cycle screens (the rendering load), `j` jitter report, `r`
+example result, `n`/`p` screens, `?` status. `capture.py` works on it unchanged. Read it
+without resetting it: `uv run python -m tools.board_ui send "?" --port COM4 --baud 921600`.
+
+The bring-up sketches still build, and flashing one replaces the firmware:
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=enabled,CDCOnBoot=default" firmware/bringup-arduino/imu_stream

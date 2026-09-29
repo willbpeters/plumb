@@ -28,20 +28,32 @@
  *     from_axis_angle  0.000e+00
  *     to_matrix        0.000e+00
  *
- * The double column is EXACTLY zero on every operation UNDER MSVC -- the C
- * reproduces NumPy bit for bit, which is what keeping the arithmetic in the
- * Python's order buys. That is the compiler's answer, not a property of the
- * port: built with `zig cc` (clang), the same cases come back at about
- * 2.2e-16, one ulp, consistent with clang contracting a*b + c*d into an FMA.
- * So a non-zero double column is not by itself a translation error. See
- * HANDOFF.md, "The compiler". The float column is about one ulp of single precision (1.19e-07)
+ * The double column is EXACTLY zero on every operation -- the C reproduces
+ * NumPy bit for bit, which is what keeping the arithmetic in the Python's
+ * order buys. It also requires -ffp-contract=off (set in analysis/tools/
+ * cbuild.py and in this component's CMakeLists.txt): a compiler free to fuse
+ * a*b+c into one FMA changes the rounding, and the ESP32-S3's GCC does so by
+ * default, so without the flag the comparison says nothing about the device.
+ * The float column is about one ulp of single precision (1.19e-07)
  * on everything except twist_angle, where the larger number is the relative
  * metric losing meaning as the angle passes through zero rather than the
  * answer being worse.
  *
- * What is NOT yet measured is what a single-precision build does to a whole
- * stroke, where the attitude integrator accumulates ~1300 of these steps. One
- * ulp per step is not one ulp per stroke. Measure that before switching.
+ * WHOLE STROKE, MEASURED 2026-09-25. One ulp per step is not one ulp per
+ * stroke, so the harness also replays every integrate call the Python pipeline
+ * makes from ADDRESS entry to impact, carrying the attitude in pl_real from
+ * step to step (test_single_precision_across_a_whole_stroke). ~1,850 steps,
+ * three putter types, two face angles, noiseless and at 0.28 dps:
+ *
+ *     double    0 exactly -- the C reproduces the pipeline's face angle
+ *               bit for bit across the whole stroke, not just per call
+ *     float     at most 4.0e-5 deg of face angle, against a 1.0 deg target
+ *
+ * A 30 s address hold (53,719 steps) gave 9.9e-6 deg: it does not walk.
+ * On this evidence single precision is safe for the attitude integrator,
+ * with ~25,000x margin. Not yet covered: forming the rates themselves in
+ * float, and everything pipeline.c will add. Re-measure then; the harness
+ * is built for exactly that.
  */
 
 #ifndef PLUMB_REAL_H
@@ -56,6 +68,7 @@ typedef float pl_real;
 #define PL_SIN(x)         sinf(x)
 #define PL_COS(x)         cosf(x)
 #define PL_FABS(x)        fabsf(x)
+#define PL_FLOOR(x)       floorf(x)
 #define PL_REAL_NAME      "float"
 #else
 typedef double pl_real;
@@ -64,6 +77,7 @@ typedef double pl_real;
 #define PL_SIN(x)         sin(x)
 #define PL_COS(x)         cos(x)
 #define PL_FABS(x)        fabs(x)
+#define PL_FLOOR(x)       floor(x)
 #define PL_REAL_NAME      "double"
 #endif
 

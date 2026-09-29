@@ -11,6 +11,7 @@ Produced by `firmware/bringup-arduino/imu_stream`, captured with
 |---|---|---|
 | 2026-09-21 | `imu_stream` | Waveshare ESP32-S3-Touch-LCD-1.28 |
 | 2026-09-22 | `imu_stream` | same board — §9.1 axes and signs |
+| 2026-09-26 | `display` | same board — display and touch bring-up |
 
 ---
 
@@ -638,3 +639,344 @@ normal. That is a property of the mount, not of the board, and it cannot be
 measured until a base is printed and the puck seats in a grip at a known
 clocking. This section establishes only that the three channels are what they
 say they are, in the order and handedness the algorithm expects.
+
+---
+
+## Display and touch bring-up — 2026-09-26
+
+Produced by `firmware/bringup-arduino/display` (design:
+`docs/superpowers/specs/2026-09-26-display-bringup-design.md`), built and flashed with
+`analysis/tools/board_ui.py`. Visual checks were made by Will at the board; everything else
+was read back over serial.
+
+**Status: the display renders, touch works, and the host-proven screens run unchanged on the
+panel.** Phase 0's "display renders" item is closed.
+
+### Pins — from the schematic, confirmed by the hardware working
+
+Read from the Waveshare ESP32-S3-Touch-LCD-1.28 **Rev3** schematic, not measured; the panel
+initialising, drawing and taking touches on exactly these pins is the confirmation.
+
+| Net | GPIO | Net | GPIO |
+|---|---|---|---|
+| LCD_DC | 8 | I2C1 SDA (touch + IMU) | 6 |
+| LCD_CS | 9 | I2C1 SCL (touch + IMU) | 7 |
+| LCD_CLK | 10 | TP_INT | 5 |
+| LCD_MOSI | 11 | TP_RST | 13 |
+| LCD_MISO | 12 (unused) | IMU_INT1 / INT2 | 4 / 3 |
+| LCD_RST | 14 | BAT_ADC | 1 |
+| LCD_BL | 2 (low-side MOSFET, active high) | | |
+
+### Orientation and colour — measured, by eye
+
+| Setting | Value | How it was found |
+|---|---|---|
+| `MADCTL` | **0x48** (MX + BGR) | BGR alone (0x08) drew every glyph mirrored left to right; setting MX fixed it. Quadrant colours, positions and edge labels then all correct, USB-C toward the viewer. |
+| Inversion | **on** (INVON, 21h) | Colours correct with it on; not changed. |
+| SPI clock | **80 MHz** | No artifacts seen, so the 40 MHz fallback was not needed. |
+
+Touch coordinates need no remapping: a swipe from right to left runs from x ≈ 220 to
+x ≈ 100 in the panel's own coordinates.
+
+### Full-screen refresh — measured
+
+Render plus flush of the whole 240 × 240 screen, at rest after each screen's motion, via
+`lv_refr_now()` timed with `micros()`. Two passes, identical to the microsecond.
+
+| Screen | Full refresh |
+|---|---|
+| idle | 15.8 ms |
+| face angle | 20.7 ms |
+| tempo | 18.6 ms |
+| path | 17.3 ms |
+| impact speed | 20.0 ms |
+| test pattern | 23.9 ms |
+
+The SPI transfer alone is 115,200 bytes at 80 MHz = 11.5 ms, so rendering costs 4–9 ms per
+full screen. Against parent spec goal 1's 500 ms from follow-through to result, drawing is
+negligible.
+
+Buffers: 2 × 28,800 B from `MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA` (invariant 7). Internal heap
+free after init: 182,520 B. Missing glyphs: 0.
+
+### Touch — measured
+
+The controller answers at 0x15 with **chip ID 0xB5**. Common drivers read 0xB5 as the
+**CST816T**, not the CST816S the board documentation names. The coordinate registers behave
+identically, which is all this uses. Swipe log (Will, three lefts and a right):
+
+```
+touch 225 127  gesture LEFT -> next       release 163 130
+touch 228 185                             release 225 186   (3 px: a tap, no gesture)
+touch 213 104  gesture LEFT -> next       release 132 121
+touch 218 114  gesture LEFT -> next       release 103 134
+touch 208 135  gesture LEFT -> next       release 127 145
+touch  36 146  gesture RIGHT -> previous  release  93 146
+```
+
+Every swipe produced the gesture in the right direction, and the screen changed each time.
+
+### Charger — read from the schematic, NOT measured, and it matters before a cell is bought
+
+The Rev3 schematic shows the charger as **ETA6098**. Parent spec §4.2 and §4.4 say ETA6096,
+rated to 800 mA. Its current-set resistor R15 is **160 kΩ**, which the schematic's own table
+maps to **1 A** (82 kΩ → 2 A, 66 kΩ → 2.5 A). On the parent spec's 400 mAh cell that is
+**2.5C**, against §4.4's limit of 1C.
+
+Not yet confirmed: the charge current on the bench, the value against the ETA6098 datasheet
+rather than the schematic's table, and that this board is Rev3 (check the silkscreen). Until
+then, treat 1 A as the charge current, and fit a cell of at least 1000 mAh or change R15.
+
+---
+
+## ESP-IDF firmware skeleton — 2026-09-27
+
+Produced by `firmware/` (ESP-IDF v5.5.5; design:
+`docs/superpowers/specs/2026-09-27-firmware-skeleton-design.md`, plan:
+`docs/superpowers/plans/2026-09-27-firmware-skeleton.md`). Build and flash with
+`firmware/idf.ps1 build` and `firmware/idf.ps1 -p COM4 flash`. The console runs at 921600;
+`uv run python -m tools.board_ui send "?" --port COM4 --baud 921600` reads the status.
+
+**Status: acquisition on core 0 is paced by the IMU's DRDY line and loses nothing at rest; the
+UI runs on core 1; the invariant-8 gate is measured to remove the loss and the timing tail that
+rendering causes.** Screens and swipes checked by Will at the board: right, and working.
+
+### Loss — measured, from the sensor's own sample counter
+
+| Condition | Samples | Lost | How |
+|---|---|---|---|
+| At rest, 60 s | 54,653 | **0** | `tools.capture --read-path direct`, unchanged; 906.93 Hz |
+| Streaming + UI rendering continuously, 60 s | 54,177 | **391 (0.72%)** | also 222 duplicates, 89 wake-ups with no sample, 82 missed edges on the board's counters |
+| Streaming + UI rendering requested, **gate armed**, 60 s | 54,720 | **0** | board counters did not move |
+| UI rendering, not streaming, 30 s windows | ~28,600 each | 0, then 1 | the since-boot counter |
+
+The measured rate, 906.93 Hz, agrees with imu_stream's 906.86 Hz from 2026-09-21 on a different
+firmware and a different read path.
+
+### Jitter — measured, 30 s windows, printed by `j`
+
+Interval is between successive DRDY edges (ISR timestamps). Latency is from the edge to the end
+of the locked read. Both are in µs, from a 1 µs histogram; percentiles are nearest-rank.
+
+| Window | interval p50 / p99 / p99.9 / max | latency min / p50 / p99 / p99.9 / max |
+|---|---|---|
+| UI rendering continuously, gate open | 1103 / 1107 / 1110 / 1113 | 702 / 926 / 1025 / 1088 / **1148** |
+| Same load requested, **gate armed** | 1103 / 1103 / 1106 / 1107 | 699 / 699 / 707 / 709 / **820** |
+
+A first pair of windows, before the init fixes below, agreed to within a few µs (animating:
+latency p50 918, max 1145; armed: p50 699, max 821).
+
+What the numbers say:
+
+- **The DRDY edges are steady under any load.** The intervals barely move, so the sensor's clock
+  and the GPIO interrupt are not what rendering disturbs.
+- **The read is what rendering slows.** Rendering moves the median read latency from 699 to
+  926 µs, and it sets a tail that passes the 1103 µs sample period. The lock holds one sample
+  from STATUSINT to GZ_H, and the datasheet says samples arriving while it is held are dropped
+  (§13.2.3). That fits the losses under rendering and streaming together.
+- **Where the delay comes from is not yet measured.** Acquisition is on core 0 and the ring
+  never overflowed, so core 0 itself is being slowed. The two suspects are the cache the two
+  cores share (LVGL on core 1 runs from flash and evicts core 0's I²C and task code) and the
+  UART driver's interrupt, which was installed from core 0. The fixes, if they are wanted, are
+  known: the acquisition path and the I²C ISR in IRAM, and the UART interrupt moved to core 1.
+  **This matters for §11 logging:** flash writes stall the cache for both cores, so writing
+  strokes to flash during a stroke would be the same problem, only worse.
+
+### Wi-Fi absent — checked by the build, and the check shown to fire
+
+`firmware/tools/check_no_radio.py` runs after every link and fails the build if any radio
+archive (`libesp_wifi.a`, `libnet80211.a`, `libbt.a`, …) contributed to the image. Two things
+were learned making it trustworthy:
+
+- **Matching symbol names does not work.** The first real map named Wi-Fi in lines that are
+  not radio code: ROM function addresses from the chip's linker script
+  (`wifi_get_macaddr = 0x40005ab4`), and esp_hw_support's `wifi_bt_common_module_enable`, a
+  peripheral-clock helper every build links. The check matches archives.
+- **A canary build that links `esp_wifi_init()` fails it**, naming `libesp_wifi.a` and
+  `libnet80211.a`. That build also overflows static DRAM by 21.5 KB, so the link itself fails
+  before the post-link step runs; the check was run by hand on the map the linker wrote.
+
+### The datasheet, corrected by the board
+
+- **INT2 needs `CTRL1` bit 4.** Rev A's register table marks `CTRL1` bits 4:3 reserved. With them
+  clear, no DRDY edge reached GPIO3: zero reads, and DRDY timeouts climbing at 10 per second.
+  With bit 4 set, reads run at the sample rate. QMI8658A material and SensorLib name bit 4
+  INT2_EN and bit 3 INT1_EN.
+- **The CTRL9 handshake takes 3253 µs, every time.** The AHB-clock-gating command (0x12) was
+  timed on every boot that reached it after the diagnostic went in: 96 boots, 3253–3254 µs.
+  The first version of this driver copied imu_stream's budget of 50 STATUSINT reads, about
+  3.2 ms at 400 kHz, right at that edge, and the handshake failed on 7 to 11 boots in 40. The
+  poll is now bounded by time (100 ms). `CTRL8.bit7` is also set, which the register table says makes STATUSINT bit 7
+  the handshake; section 5.10.1 says bit 7 is set either way. Which of the two changes mattered
+  was not separated. The timing number suggests the budget did.
+- **Every read finds Avail set and Locked still clear.** In SyncSample mode, the STATUSINT read
+  that starts the lock sees Locked = 0, so the driver waits the 6 µs Data_Lock_Delay (Table 40)
+  on every sample. The `unlocked` counter equals `reads`. Expected, not a fault.
+
+### A reset in the middle of a read — measured, and fixed
+
+The MCU can reset while the IMU is sending (the bus is busy about 45% of the time at
+906.86 Hz), and the IMU is not reset with it. Across repeated resets through EN, **before:** 5
+of 20, then 12 of 40, failed the IMU init. The status line now reports each boot's init step,
+SDA level and bus-clear clocks, and they showed two separate causes:
+
+| Cause | Evidence | Fix | After |
+|---|---|---|---|
+| SDA held low by the IMU mid-byte | every boot that found SDA low failed; ESP-IDF's `i2c_master_bus_reset()` left it low; a hand clear that stopped clocking at the first high SDA still failed 4 of 40 (a 1 data bit is not a release) | nine clocks with SDA released, then a STOP (NXP UM10204 §3.1.16), before the driver takes the pins | released in 1–7 clocks, every time |
+| CTRL9 handshake timing out | STATUSINT never showed CmdDone within 50 reads | bounded by time; `CTRL8.bit7` | 3253 µs measured |
+
+**After: 60 of 60 resets brought the IMU up**, six of them from a stuck bus.
+
+### Memory — measured
+
+Binary 651 KB (58% of the 1.5 MB app partition free). Internal heap free at runtime:
+**52,947 B**, against 182,520 B under the Arduino display sketch. Not yet broken down: this
+firmware adds the ring (14 KB) and two histograms (16 KB) in static DRAM, which does not
+account for it all. The canary build's 21.5 KB DRAM overflow says static DRAM is the tighter
+budget. PSRAM free: 2.08 MB,
+untouched: the fonts are still in flash-mapped rodata (invariant 7 permits PSRAM for them; not
+yet done).
+
+### Not yet checked
+
+- The 120 MHz flash of parent §6.3 (not attempted: it needs `SPI_FLASH_HPM_ON` and a flash part
+  that supports it) and `LV_MEMCPY_MEMSET_STD` (an LVGL 8 name; its LVGL 9 equivalent lives in
+  the shared `lv_conf.h`).
+
+---
+
+## Where rendering's delay comes from — 2026-09-27
+
+Follows from the skeleton section above, which found that rendering on core 1 slowed the IMU
+reads on core 0 and, together with streaming, lost 0.72% of samples. Found one variable at a
+time, with the `j` report, which now splits each read's latency into three consecutive segments.
+
+### The split — measured, 30 s windows, µs
+
+| Segment | Armed p50 / max | Animating p50 / max | Rendering adds (p50) |
+|---|---|---|---|
+| Edge → task running | 7 / 14 | 10 / 70 | +3 |
+| STATUSINT read (1 byte) | 162 / 249 | 320 / 474 | **+158** |
+| Lock wait + burst (17 bytes) | 532 / 543 | 586 / 855 | +54 |
+
+The interrupt and the scheduler are not the problem. The delay is inside the I²C transfers,
+and mostly in the first one, although the second moves seventeen times the data. A bus or
+memory slowed by rendering would hurt the long transfer most. The pattern fits **code gone
+cold**: the I²C master driver runs from flash through the cache the two cores share, LVGL on
+core 1 evicts it in the ~1 ms between samples, and the first transfer of each sample pays the
+misses while the second finds the code warm.
+
+### Cause 1: the I²C driver evicted from the shared cache — confirmed and fixed
+
+The one change: a linker fragment (`firmware/components/board/linker.lf`) places ESP-IDF's
+`i2c_master` and `i2c_hal` objects in IRAM. ESP-IDF v5.5.5 keeps only the driver's ISR there
+by default; `I2C_ISR_IRAM_SAFE` would move four functions of the task-side path, not all of it.
+
+| Animating, gate open | latency p50 | p99 | max | lost |
+|---|---|---|---|---|
+| Driver in flash | 930 | 1033 | 1156 | 4 since boot (includes boot-time loss, below) |
+| **Driver in IRAM** | **700** | 958 | **1026** | 0 |
+| Armed, for reference | 700 | 707 | 732 | 0 |
+
+**Streaming while animating: 391 of 54,568 lost before, 0 of 55,064 after.** The worst read
+now finishes inside the 1103 µs sample period. The cost is internal RAM: heap free fell from
+52,947 to 38,711 B, about 12 KB of it this move (the record also grew 4 bytes, 2 KB across the
+ring; the new histograms are in PSRAM).
+
+### Cause 2: touch polling on the shared bus — the remaining tail, confirmed
+
+With the driver in IRAM, the median while animating equals the armed median, and what is left
+is a tail in about 1–3% of samples: STATUSINT p99 319 against 169, burst p99 786 against 539.
+
+| Gate open | latency p50 | p99 | max |
+|---|---|---|---|
+| Nothing rendering, touch polled | 714 | 937 | 973 |
+| Animating, touch polled | 700 | 958 | 1026 |
+| **Animating, touch polling off** (a temporary build) | **714** | **729** | **745** |
+
+LVGL reads the touch controller every 30 ms, about one IMU sample in 27. A 5-byte touch read
+holds the shared bus for about 150–250 µs, the size of the extra time, and it lands in
+whichever of the two IMU transfers it collides with. It is independent of rendering, and the
+gate already stops it during a stroke (invariant 8; parent §6.4). Outside a stroke it costs
+latency, not samples: 0 lost in every window with it.
+
+If the tail ever matters outside a stroke, the fix is to schedule, not to suspend. A touch read
+fits in the ~400 µs the bus is free after each IMU read, so the app could poll touch right after
+an IMU read completes instead of on LVGL's own timer. Not done; it is a design decision.
+
+### Open: samples lost in the first second after boot
+
+Across 12 resets, 10 boots lost samples in the first ~0.9 s: usually 1 lost and 1 duplicated,
+once 2 and 2, and once **24 lost** (the acquisition task starved for about 26 ms). It never
+grows after boot; a 60 s stream afterwards added nothing. The leading suspect, not yet tested:
+the touch controller's init on core 1, which starts while the IMU is already running, and whose
+reads have a 10 ms timeout; a controller still waking from reset could hold the bus that long.
+It matters once sleep and wake (§9) put a boot, or a wake, right before a stroke.
+
+---
+
+## Sample rate measured at startup (2026-09-28)
+
+Will's decision of 2026-09-27, implemented: the firmware measures the IMU's rate itself, and the
+pipeline integrates with it (spec §6.4, amended 2026-09-28). `acq/rate.c` fits DRDY edge time
+(`esp_timer`, in the ISR) against the sample index from the sensor's own counter, over the first
+1,024 samples after boot, rejecting mispaired edges at 5 robust sigmas.
+
+**Cold boot, just after flashing:** 906.9249 Hz, 1,023 of 1,024 points kept, residual RMS
+0.40 µs, max 3.84 µs, no samples lost.
+
+**30 back-to-back measurements (`m`), board warm** — `tools/rate_check.py`:
+
+| | |
+|---|---|
+| Mean | **906.9314 Hz** |
+| SD | 2.5×10⁻⁴ Hz (**0.28 ppm**) |
+| Range | 906.9310 – 906.9319 (1.0 ppm) |
+| Fit's own standard error | 3.2×10⁻⁵ Hz, residual RMS 0.33–0.39 µs, 0–2 points rejected per run |
+| Spread / reported error | **8.0** |
+
+The spread is eight times the fit's error, and it is not scatter: the sequence falls smoothly
+from 906.9319 to 906.9310 and climbs back. That is the oscillator wandering, which the fit does
+not model and should not; it is what bounds one measurement, at about a part per million.
+
+**Against an independent clock.** Streaming 60 s (54,540 samples) and fitting the sample index
+against this PC's arrival times: **906.9436 ± 0.0016 Hz, 13.4 ppm above the board's figure.**
+`esp_timer` counts the ESP32-S3's crystal; the PC has its own. 13 ppm is an ordinary
+disagreement between two crystals, and the check bounds their difference without saying which
+is right. So the measurement's systematic uncertainty is **of order 15 ppm**, and nothing on
+the board can shrink it — the crystal is the reference.
+
+**Across days, this unit:** 906.86 (09-21) → 906.93 (09-27) → 906.925 cold, 906.931 warm (09-28).
+About 75 ppm between days and 7 ppm of warm-up. None of it matters to a metric (100 ppm is
+0.001° on a 10° rotation, against 11,200 ppm uncorrected), but every one of those numbers
+would have been a stale constant.
+
+---
+
+## The stroke pipeline on the board (2026-09-28)
+
+`firmware/main/stroke.c`: a `pl_session` on the app task (core 1), fed from the ring drain,
+driving the render gate from BACKSWING through FOLLOWTHROUGH.
+
+**Memory.** The first link overflowed `dram0_0_seg` by 143,912 bytes: a 157 KB session in
+single precision, 130 KB of it the 3 s path ring. At runtime 38.7 KB of internal SRAM was free.
+
+| | Internal SRAM |
+|---|---|
+| LVGL code in IRAM (`LV_ATTRIBUTE_FAST_MEM_USE_IRAM`) | 111,946 B |
+| LVGL static heap (`LV_MEM_SIZE` 96 KB) | 98,844 B |
+| LVGL heap actually used, every screen cycled 20 s, measured twice | **9,968 B peak** |
+| Free after moving LVGL code to flash and the heap to 32 KB | 204,415 B |
+| Largest single free block | 126,976–139,264 B — the session did not fit in one piece |
+| Free after the path ring (98 KB + 33 KB) and session (26 KB), allocated separately | **58,799 B** |
+
+**Rendering cost of LVGL in flash** — `lv_timer_handler` duration while cycling screens, 20 s:
+14.05 ms mean / 16.32 ms max in IRAM, 14.83 / 18.30 ms in flash.
+
+**Step cost at rest** (ADDRESS, float): mean 272 µs, max 743 µs over 8,185 steps, against a
+1,103 µs sample period. Most of it is the rest test's per-sample window statistics.
+
+**Sample rate this boot:** 906.8538–906.8686 Hz across three boots, against 906.93 earlier the
+same day — another ~75 ppm of the drift spec §6.4 now absorbs.
+
+**Not yet exercised:** a real stroke. That needs a hand on the board; HANDOFF.md, next task 1.
