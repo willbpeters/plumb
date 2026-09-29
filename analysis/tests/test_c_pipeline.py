@@ -34,7 +34,7 @@ from plumb.sensor import GRAVITY, SensorParams, simulate
 from plumb.trajectory import SAMPLE_RATE_HZ, ArcType, StrokeParams, generate
 
 from tests.test_c_port import _build, fmt, run_c
-from tests.test_pipeline import true_face_path, true_face_speed
+from tests.test_pipeline import sample_index, true_face_path, true_face_speed
 
 NOISY = SensorParams(gyro_noise_dps=0.28, accel_noise_mps2=0.02,
                      gyro_bias_dps=1.5)
@@ -209,7 +209,7 @@ def test_the_c_meets_the_same_ground_truth(portcheck):
             assert r["path_travel_m"] == pytest.approx(travel_true, rel=0.05)
             assert r["speed_valid"]
             assert r["impact_speed_mps"] == pytest.approx(
-                true_face_speed(traj, c.i_speed_n), rel=0.005)
+                true_face_speed(traj, sample_index(c.i_speed_n)), rel=0.005)
 
 
 def test_a_calibrated_session_matches_the_python(portcheck):

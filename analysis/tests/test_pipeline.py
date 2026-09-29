@@ -237,6 +237,18 @@ def test_path_arc_grows_with_lie_angle(lie):
     assert result.path_arc_m == pytest.approx(arc_true, rel=0.10)
 
 
+def sample_index(n: int) -> int:
+    """The stream index of the pipeline's sample number n.
+
+    Pipeline.n counts from 1: it is incremented before a sample is processed,
+    so the first sample is n = 1 and lives at index 0. Every i_* the pipeline
+    records is an n. Ground truth indexed by n directly is one sample late --
+    true_face_path and the impact speed tests both were, found 2026-09-28 by a
+    session test whose offsets made the error large enough to see.
+    """
+    return n - 1
+
+
 def true_face_path(traj, pipeline=None):
     """The face point's real ground-plane track, straight from the generator.
 
@@ -258,7 +270,8 @@ def true_face_path(traj, pipeline=None):
     p = traj.params
     face_body = np.array([0.0, 0.0, -(p.pivot_offset_m + p.lever_arm_m)])
     if pipeline is not None and pipeline._track_first_n is not None:
-        lo, hi = pipeline._track_first_n, pipeline._track_last_n + 1
+        lo = sample_index(pipeline._track_first_n)
+        hi = sample_index(pipeline._track_last_n) + 1
     else:
         lo, hi = traj.address_end_index, traj.impact_index + 200
     world = np.array([quat.rotate(q, face_body) for q in traj.q_true[lo:hi]])
@@ -568,12 +581,12 @@ def test_impact_speed_matches_the_true_face_speed(tempo, amplitude):
     traj, pipe, result = run_stroke(StrokeParams(
         tempo_ratio=tempo, backswing_amplitude_deg=amplitude,
         followthrough_amplitude_deg=amplitude))
-    at_sample = true_face_speed(traj, pipe.i_speed_n)
+    at_sample = true_face_speed(traj, sample_index(pipe.i_speed_n))
     at_impact = true_face_speed(traj, traj.impact_index)
     print(f"\n  tempo {tempo} amp {amplitude}: {result.impact_speed_mps:.4f} m/s, "
-          f"truth {at_sample:.4f} at its sample ({pipe.i_speed_n}), "
+          f"truth {at_sample:.4f} at its sample ({sample_index(pipe.i_speed_n)}), "
           f"{at_impact:.4f} at impact ({traj.impact_index})")
-    assert pipe.i_speed_n < traj.impact_index
+    assert sample_index(pipe.i_speed_n) < traj.impact_index
     assert result.impact_speed_mps == pytest.approx(at_sample, rel=0.005)
 
 
@@ -588,7 +601,7 @@ def test_impact_speed_under_noise():
             StrokeParams(), SensorParams(gyro_noise_dps=0.28,
                                          accel_noise_mps2=0.02,
                                          gyro_bias_dps=1.5), seed=seed)
-        truth = true_face_speed(traj, pipe.i_speed_n)
+        truth = true_face_speed(traj, sample_index(pipe.i_speed_n))
         errors.append(result.impact_speed_mps / truth - 1.0)
     errors = np.array(errors)
     print(f"\n  impact speed at 0.28 dps, 10 strokes: error mean "

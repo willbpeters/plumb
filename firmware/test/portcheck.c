@@ -22,6 +22,7 @@
 #include "plumb/pipeline.h"
 #include "plumb/pivot.h"
 #include "plumb/quat.h"
+#include "plumb/session.h"
 
 /* pivupdate carries fifteen numbers at up to ~25 characters each. */
 #define LINE_MAX_CHARS 1024
@@ -73,8 +74,56 @@ static void print_solution(int solved, const pl_pivot_solution *solution)
     print_reals(row, 7);
 }
 
-/* Static: the track ring makes it ~260 KB in double, too big for a stack. */
+/* Static: the track ring makes these ~260 KB each in double, too big for a
+ * stack. */
 static pl_pipeline pipeline;
+static pl_session session;
+
+#define CONFIG_VALUES 24
+
+/* rate, gyro and accel scale, lever arm, the fourteen thresholds in
+ * declaration order, accel offset[3] and gain[3]. */
+static void config_from(const pl_real *values, pl_pipeline_config *cfg)
+{
+    pl_thresholds *th = &cfg->th;
+    int i;
+    cfg->sample_rate_hz = values[0];
+    cfg->gyro_rad_per_count = values[1];
+    cfg->accel_mps2_per_count = values[2];
+    cfg->lever_arm_m = values[3];
+    th->stillness_window_s = values[4];
+    th->stillness_gyro_std_rad = values[5];
+    th->onset_gyro_rad = values[6];
+    th->backswing_gyro_rad = values[7];
+    th->backswing_hold_s = values[8];
+    th->transition_gyro_rad = values[9];
+    th->impact_accel_mps2 = values[10];
+    th->followthrough_gyro_rad = values[11];
+    th->followthrough_hold_s = values[12];
+    th->accel_gain_static = values[13];
+    th->accel_gain_stroke = values[14];
+    th->path_straight_arc_m = values[15];
+    th->pivot_max_residual = values[16];
+    th->stroke_timeout_s = values[17];
+    for (i = 0; i < 3; i++) {
+        cfg->accel_offset_mps2[i] = values[18 + i];
+        cfg->accel_gain[i] = values[21 + i];
+    }
+}
+
+static int parse_counts(const char *line, int16_t gyro[3], int16_t accel[3])
+{
+    pl_real values[6];
+    int i;
+    if (!parse_reals(line, values, 6)) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        gyro[i] = (int16_t)values[i];
+        accel[i] = (int16_t)values[3 + i];
+    }
+    return 1;
+}
 
 static void print_stroke(const pl_stroke_result *r)
 {
@@ -281,54 +330,54 @@ int main(void)
                            &solution);
 
         } else if (strcmp(op, "pipinit") == 0) {
-            /* rate, gyro and accel scale, lever arm, the thirteen thresholds
-             * in declaration order, accel offset[3] and gain[3], and whether
-             * to fold into the session calibration. */
-            pl_real values[24];
+            /* The config, then whether to fold into the session calibration. */
+            pl_real values[CONFIG_VALUES + 1];
             pl_pipeline_config cfg;
-            pl_thresholds *th = &cfg.th;
-            if (!parse_reals(line, values, 24)) {
+            if (!parse_reals(line, values, CONFIG_VALUES + 1)) {
                 fprintf(stderr, "bad pipinit: %s", line);
                 return 1;
             }
-            cfg.sample_rate_hz = values[0];
-            cfg.gyro_rad_per_count = values[1];
-            cfg.accel_mps2_per_count = values[2];
-            cfg.lever_arm_m = values[3];
-            th->stillness_window_s = values[4];
-            th->stillness_gyro_std_rad = values[5];
-            th->onset_gyro_rad = values[6];
-            th->backswing_gyro_rad = values[7];
-            th->backswing_hold_s = values[8];
-            th->transition_gyro_rad = values[9];
-            th->impact_accel_mps2 = values[10];
-            th->followthrough_gyro_rad = values[11];
-            th->followthrough_hold_s = values[12];
-            th->accel_gain_static = values[13];
-            th->accel_gain_stroke = values[14];
-            th->path_straight_arc_m = values[15];
-            th->pivot_max_residual = values[16];
-            for (i = 0; i < 3; i++) {
-                cfg.accel_offset_mps2[i] = values[17 + i];
-                cfg.accel_gain[i] = values[20 + i];
-            }
+            config_from(values, &cfg);
             printf("%d\n", pl_pipeline_init(&pipeline, &cfg,
-                                            values[23] != 0 ? &calibration : NULL));
+                                            values[CONFIG_VALUES] != 0
+                                                ? &calibration : NULL));
 
         } else if (strcmp(op, "pipstep") == 0) {
-            pl_real values[6];
             int16_t gyro[3], accel[3];
             pl_stroke_result result;
-            if (!parse_reals(line, values, 6)) {
+            if (!parse_counts(line, gyro, accel)) {
                 fprintf(stderr, "bad pipstep: %s", line);
                 return 1;
             }
-            for (i = 0; i < 3; i++) {
-                gyro[i] = (int16_t)values[i];
-                accel[i] = (int16_t)values[3 + i];
-            }
             if (pl_pipeline_step(&pipeline, gyro, accel, &result)) {
                 print_stroke(&result);
+            }
+
+        } else if (strcmp(op, "sesinit") == 0) {
+            pl_real values[CONFIG_VALUES];
+            pl_pipeline_config cfg;
+            if (!parse_reals(line, values, CONFIG_VALUES)) {
+                fprintf(stderr, "bad sesinit: %s", line);
+                return 1;
+            }
+            config_from(values, &cfg);
+            printf("%d\n", pl_session_init(&session, &cfg));
+
+        } else if (strcmp(op, "sesstep") == 0) {
+            /* A result row (11 values), and on the step a stroke was
+             * abandoned, a three-value row: -1, reason, state it left. */
+            int16_t gyro[3], accel[3];
+            pl_stroke_result result;
+            if (!parse_counts(line, gyro, accel)) {
+                fprintf(stderr, "bad sesstep: %s", line);
+                return 1;
+            }
+            if (pl_session_step(&session, gyro, accel, &result)) {
+                print_stroke(&result);
+            }
+            if (session.abandoned_this_step) {
+                printf("-1 %d %d\n", (int)session.last_abandon_reason,
+                       (int)session.last_abandoned_from);
             }
 
         } else if (strcmp(op, "pipstate") == 0) {

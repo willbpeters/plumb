@@ -11,7 +11,7 @@
 
 1. `CLAUDE.md` — eight hard invariants. They are the decisions that fail silently.
 2. `docs/superpowers/specs/2026-09-15-putting-analyzer-design.md` — the spec, and the source
-   of truth. **It carries eight marked amendments plus one added section (§1.2.1); see "Spec
+   of truth. **It carries nine marked amendments plus one added section (§1.2.1); see "Spec
    amendments" below.**
 3. `docs/bringup-results.md` — everything the real hardware has told us. **Read the last
    section first**; it corrects two numbers in the earlier ones and says so.
@@ -392,7 +392,7 @@ is enough to see the resonance §5.5 looks for.
 
 ## Spec amendments already made
 
-Eight amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
+Nine amendments to existing text, each marked *Amended* in the spec with its reasoning, plus
 one new section. The four to §6.4 came from reading the datasheet or measuring the hardware;
 the §11 one is a consequence of the §6.4 rate change that was missed at the time; the §7.4 one
 records what the path code has actually done since the pivot estimate went in; the §4.4 one
@@ -408,6 +408,7 @@ records the charger the schematic actually shows; the §6.2 one records data-rea
 | 4.4 | ETA6096, ≤ 800 mA | **ETA6098, 1 A** (R15 = 160 kΩ) | Read from the Rev3 schematic at display bring-up, as §4.4 asks. 2.5C on the planned 400 mAh cell. Not yet bench-measured. Amended 2026-09-26. |
 | 6.2 | "hardware-timer driven" | **paced by the IMU's DRDY line** | A timer on the ESP32's clock drifts against the IMU's 906.86 Hz and would duplicate or miss ~1 sample in 100. Amended 2026-09-27 with the skeleton's loss and jitter measurements. |
 | 6.4 | 896.8 Hz, used as the rate | **the rate measured at startup** | This unit runs 1.12% fast and moves ~75 ppm between days; a constant goes stale. Measured to ~15 ppm (crystal-bound). Will's decision 2026-09-27, amended 2026-09-28 with the board measurements. |
+| 7.1 | forward only | **ABANDONED on rest or timeout before impact; DONE without path on timeout after** | A practice stroke waited in DOWNSWING forever with rendering suspended. Rest = the address test failing then passing again. Will's decision, amended 2026-09-28. |
 | 1.2.1 | — | **new** | Distance approximation recorded as deferred, not rejected. Impact speed promoted to a first-build metric — it falls out of `v = ω × r` for free. |
 
 Also corrected in `analysis/plumb/sensor.py`: the full-scale divisor is 2¹⁵, not `INT16_MAX`.

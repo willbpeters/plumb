@@ -29,6 +29,9 @@ class State(Enum):
     IMPACT = auto()
     FOLLOWTHROUGH = auto()
     DONE = auto()
+    # Terminal, like DONE, but with no result: the stroke never reached
+    # impact. See Pipeline._check_exits.
+    ABANDONED = auto()
 
 
 @dataclass(frozen=True)
@@ -57,20 +60,28 @@ class Thresholds:
     # is not describing a rigid rotation about a fixed point, and the path
     # falls back to the sensor's own lever arm.
     pivot_max_residual: float = 0.5
+    # From backswing onset: a stroke still unfinished after this is abandoned
+    # (before impact) or finished without a path (after it). A backstop for
+    # the rest test, for a putter carried off and never put down. A
+    # placeholder like every value here, chosen only to exceed any stroke the
+    # generator makes (the slowest need 2.6 s onset to DONE); Phase 2 sets it.
+    stroke_timeout_s: float = 5.0
 
 
 @dataclass
 class StrokeResult:
     face_angle_deg: float
     tempo_ratio: float
-    path_arc_m: float
-    path_direction: str
+    # None when the path is unavailable: a follow-through that never went
+    # quiet (Pipeline._check_exits) has no motion end to measure to.
+    path_arc_m: float | None
+    path_direction: str | None
     # The phases themselves, not only their ratio (the tempo screen draws them
     # to length), and the stroke's net ground-plane travel (which scales the
     # path drawing). Both computed anyway; reported so the device can show them.
     backswing_s: float = 0.0
     downswing_s: float = 0.0
-    path_travel_m: float = 0.0
+    path_travel_m: float | None = 0.0
     # Clubhead speed arriving at the ball (parent spec 1.2.1). None when the
     # pivot is not known: see _impact_speed.
     impact_speed_mps: float | None = None
@@ -114,6 +125,12 @@ class Pipeline:
         self.i_impact = None
         self.i_motion_end = None
         self._hold = 0
+        # Why the stroke was abandoned, and from which state, if it was.
+        self.abandon_reason: str | None = None
+        self.abandoned_from: State | None = None
+        # Whether the stillness window has failed the stillness test since
+        # address was captured. See _check_exits.
+        self._unsettled = False
 
         # Back-tracking state. Detecting a stroke boundary always lags the
         # boundary itself; these record where it actually was. Past data only.
@@ -171,10 +188,14 @@ class Pipeline:
             self._step_idle(omega, accel)
             return None
 
-        if self.state is State.DONE:
+        if self.state in (State.DONE, State.ABANDONED):
             return None
 
         self._integrate(omega, accel)
+
+        finished, result = self._check_exits(omega)
+        if finished:
+            return result
 
         if self.state is State.ADDRESS:
             self._step_address(omega)
@@ -215,6 +236,72 @@ class Pipeline:
             self.address_captured = True
             self.q = quat.identity()
             self._enter(State.ADDRESS)
+
+    def _abandon(self, reason: str) -> None:
+        self.abandon_reason = reason
+        self.abandoned_from = self.state
+        self._enter(State.ABANDONED)
+
+    def _check_exits(self, omega):
+        """The ways out of a stroke that parent spec 7.1 does not have.
+
+        Will's decision, 2026-09-28. The state machine only ran forward, so a
+        stroke that never reached impact -- a practice stroke with no ball, a
+        putter picked up after address, a walk to the ball -- waited in
+        DOWNSWING for an impact that would never come, with the render gate
+        armed and the screen frozen.
+
+        REST: back at rest abandons a stroke that has not reached impact.
+        "Back at rest" is the address test itself, on the same rolling window,
+        run in both directions: the window must first FAIL it (the stroke is
+        unsettled) and then pass it again. Passing it once motion has merely
+        been seen is not enough -- at backswing onset the window is still
+        nearly all address stillness and passes, and the first version of
+        this abandoned every real stroke at birth. The window cannot pass
+        again until the motion has slid out of it. And a 0.5 s standard
+        deviation of 0.28 dps noise never approaches the 0.8 dps threshold,
+        where a single-sample test at onset trips on noise several times a
+        window.
+
+        It applies in ADDRESS too: a waggle or a re-grip that settles again
+        leaves g0, the bias and the attitude's zero describing a position the
+        golfer has left, and face angle is relative to address (invariant 3)
+        -- the address the stroke starts from. Stillness at address with no
+        motion never fails the test, and does nothing.
+
+        TIMEOUT, from backswing onset, as a backstop for the putter carried
+        off and never put down. Before impact the stroke is abandoned. After
+        it the stroke is committed -- face angle, tempo and speed are all
+        fixed at impact -- so it is finished with those, and the path, which
+        needs the motion's end, is reported unavailable rather than measured
+        over whatever the putter did next. IMPACT itself is a few samples and
+        is left to end on its own.
+
+        Nothing here looks at rotation size (invariant 1): the rest test is
+        the address test. Returns (finished, result).
+        """
+        if self.state in (State.ADDRESS, State.BACKSWING, State.DOWNSWING):
+            window = int(self.th.stillness_window_s / self.dt)
+            self._still.append(omega)
+            self._still = self._still[-window:]
+            if len(self._still) == window:
+                still = np.all(np.array(self._still).std(axis=0)
+                               < self.th.stillness_gyro_std_rad)
+                if not still:
+                    self._unsettled = True
+                elif self._unsettled:
+                    self._abandon("rest")
+                    return True, None
+
+        if (self.state in (State.BACKSWING, State.DOWNSWING, State.FOLLOWTHROUGH)
+                and (self.n - self.i_backswing_start) * self.dt
+                > self.th.stroke_timeout_s):
+            if self.state is State.FOLLOWTHROUGH:
+                self._enter(State.DONE)
+                return True, self._compute(with_path=False)
+            self._abandon("timeout")
+            return True, None
+        return False, None
 
     def _step_address(self, omega) -> None:
         """Detect the backswing, and record where it actually started.
@@ -537,9 +624,28 @@ class Pipeline:
         face = np.array([0.0, 0.0, -self.lever_arm]) + solution.offset
         return float(np.linalg.norm(np.cross(self._pre_impact_omega, face)))
 
-    def _compute(self) -> StrokeResult:
+    def _compute(self, with_path: bool = True) -> StrokeResult:
         backswing = (self.i_transition - self.i_backswing_start) * self.dt
         downswing = (self.i_impact - self.i_transition) * self.dt
+
+        # The pivot first: speed needs it whether or not there is a path.
+        if self._pivot_calibration is not None:
+            self._pivot_calibration.fold(self._pivot)
+            self._pivot_solution = self._pivot_calibration.solve()
+        else:
+            self._pivot_solution = self._pivot.solve()
+
+        if not with_path:
+            return StrokeResult(
+                impact_speed_mps=self._impact_speed(),
+                face_angle_deg=np.degrees(self._face_angle_at_impact()),
+                tempo_ratio=backswing / downswing,
+                path_arc_m=None,
+                path_direction=None,
+                backswing_s=backswing,
+                downswing_s=downswing,
+                path_travel_m=None,
+            )
 
         # Path must be measured in the GROUND plane, for the same reason face
         # angle is (parent spec 7.3). Body Y is tilted out of horizontal by the
@@ -570,11 +676,6 @@ class Pipeline:
         # sample, not 12), or assume the pivot lies on the shaft axis, which
         # collapses the matrix to a vector -- at the cost of an assumption
         # about where the hands are that the measurement does not need now.
-        if self._pivot_calibration is not None:
-            self._pivot_calibration.fold(self._pivot)
-            self._pivot_solution = self._pivot_calibration.solve()
-        else:
-            self._pivot_solution = self._pivot.solve()
         track_list = self._face_track
         if (self._pivot_solution is not None
                 and self._pivot_solution.residual_fraction

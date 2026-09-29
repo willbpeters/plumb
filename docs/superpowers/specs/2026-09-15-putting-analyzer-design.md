@@ -512,6 +512,42 @@ SLEEP → IDLE → ADDRESS → BACKSWING → DOWNSWING → IMPACT → FOLLOWTHRO
 Entering ADDRESS captures two things: the gravity vector `g₀`, and the gyro bias `b` as the
 mean angular rate over the stillness window. Sampling steps to 896.8 Hz on ADDRESS entry.
 
+**A stroke that does not reach IMPACT is abandoned**: no result, and the next stroke starts
+from IDLE.
+
+| Exit | Condition | From |
+|---|---|---|
+| ABANDONED (rest) | The stillness window fails the ADDRESS stillness test, then passes it again | ADDRESS, BACKSWING, DOWNSWING |
+| ABANDONED (timeout) | Longer than a maximum stroke duration since backswing onset | BACKSWING, DOWNSWING |
+| DONE, path unavailable | The same timeout, after impact | FOLLOWTHROUGH |
+
+*Amended 2026-09-28 (Will's decision).* The state machine above previously only ran forward.
+A real device sees practice strokes with no ball, putters picked up after address, waggles,
+re-grips, and walks to the ball. Each of these starts a stroke that never reaches impact, and
+the machine waited in DOWNSWING indefinitely for an impact that never came, with rendering
+suspended (§6.2).
+
+- **Rest is the ADDRESS test, run in both directions.** The window must first fail the
+  stillness test and then pass it again. Passing it once motion has merely been seen is not
+  enough. At backswing onset the 0.5 s window is still almost entirely address stillness, and
+  the first implementation abandoned every real stroke at its first samples. The window
+  cannot pass again until the motion has slid out of it.
+- **Rest applies at ADDRESS too.** A waggle or re-grip that settles again leaves `g₀`, `b` and
+  the attitude's zero describing a position the golfer has left. Face angle is relative to
+  address (§3.3), and the address that matters is the one the stroke starts from. Stillness
+  at address with no motion never fails the test, and changes nothing.
+- **After impact the stroke is committed.** Face angle, tempo and impact speed are all fixed
+  at impact. A follow-through that never goes quiet, such as walking off still swinging the
+  putter, has no motion end to measure path to. The stroke is therefore finished with path
+  reported unavailable, rather than measured over the walk.
+- **The maximum stroke duration is a threshold, like every other**, and is unnumbered here for
+  the same reason (§7.6).
+
+Tested against continuous synthetic streams (a practice stroke with no impact followed by a
+putt; a waggle, then a putt): the putt's face angle, tempo and speed match ground truth, and
+the C port makes the same decisions as the Python (`analysis/tests/test_session.py`,
+`test_c_session.py`).
+
 All detection thresholds referenced above are deliberately left unnumbered here. They are
 derived empirically from the logged stroke corpus during Phase 2 and fixed in the Python
 notebook before the algorithm is ported to C (§7.6). Choosing them analytically ahead of real

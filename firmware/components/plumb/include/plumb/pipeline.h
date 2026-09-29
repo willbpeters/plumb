@@ -57,8 +57,16 @@ typedef enum {
     PL_STATE_DOWNSWING,
     PL_STATE_IMPACT,
     PL_STATE_FOLLOWTHROUGH,
-    PL_STATE_DONE
+    PL_STATE_DONE,
+    /* Terminal like DONE, with no result: the stroke never reached impact. */
+    PL_STATE_ABANDONED
 } pl_state;
+
+typedef enum {
+    PL_ABANDON_NONE = 0,
+    PL_ABANDON_REST = 1,     /* back at rest before impact */
+    PL_ABANDON_TIMEOUT = 2   /* stroke_timeout_s from onset, before impact */
+} pl_abandon_reason;
 
 /* Values match plumb_ui's pl_path_dir, which this component does not include:
  * the algorithm knows nothing about the screen. */
@@ -83,6 +91,7 @@ typedef struct {
     pl_real accel_gain_stroke;
     pl_real path_straight_arc_m;
     pl_real pivot_max_residual;
+    pl_real stroke_timeout_s;
 } pl_thresholds;
 
 typedef struct {
@@ -144,6 +153,11 @@ typedef struct {
     int has_backswing_direction;
     pl_real last_same_sign_n;
 
+    /* The exits parent spec 7.1 did not have (pipeline.py, _check_exits). */
+    int unsettled;              /* the stillness window has failed since address */
+    pl_abandon_reason abandon_reason;
+    pl_state abandoned_from;
+
     pl_real i_backswing_start;
     pl_real i_transition;
     int i_impact;
@@ -183,7 +197,8 @@ int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
                      pl_pivot_calibration *calibration);
 
 /* One sample, in raw counts. Returns 1 and fills `out` on the sample the
- * stroke completes; 0 otherwise. */
+ * stroke completes; 0 otherwise. A stroke that never reaches impact ends in
+ * PL_STATE_ABANDONED with no result; abandon_reason says why. */
 int pl_pipeline_step(pl_pipeline *p, const int16_t gyro_counts[3],
                      const int16_t accel_counts[3], pl_stroke_result *out);
 

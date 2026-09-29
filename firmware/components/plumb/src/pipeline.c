@@ -74,6 +74,10 @@ int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
     p->has_backswing_direction = 0;
     p->last_same_sign_n = (pl_real)0.0;
 
+    p->unsettled = 0;
+    p->abandon_reason = PL_ABANDON_NONE;
+    p->abandoned_from = PL_STATE_IDLE;
+
     p->i_backswing_start = (pl_real)0.0;
     p->i_transition = (pl_real)0.0;
     p->i_impact = 0;
@@ -101,17 +105,15 @@ int pl_pipeline_init(pl_pipeline *p, const pl_pipeline_config *cfg,
     return 1;
 }
 
-/* Wait for stillness, then capture the bias, g0 and the gyro's noise from the
- * same window. The window is a ring of the last still_window samples; the
- * Python's list, trimmed to the same length, holds the same samples. */
-static void step_idle(pl_pipeline *p, const pl_real omega[3],
+/* The stillness window: a ring of the last still_window samples. The Python's
+ * list, trimmed to the same length, holds the same samples. It runs from IDLE
+ * through DOWNSWING -- address capture and the rest test are the same test on
+ * the same window. Returns whether the window is full. */
+static int still_push(pl_pipeline *p, const pl_real omega[3],
                       const pl_real accel[3])
 {
     const int window = p->still_window;
-    const pl_real count = (pl_real)window;
-    pl_real mean_w[3], mean_a[3], var[3], cov[9];
-    int i, j, k, slot;
-
+    int i;
     for (i = 0; i < 3; i++) {
         p->still_omega[p->still_head][i] = omega[i];
         p->still_accel[p->still_head][i] = accel[i];
@@ -120,12 +122,18 @@ static void step_idle(pl_pipeline *p, const pl_real omega[3],
     if (p->still_count < window) {
         p->still_count++;
     }
-    if (p->still_count < window) {
-        return;
-    }
+    return p->still_count >= window;
+}
 
-    /* Oldest first, as the Python's array is ordered. still_head now points
-     * at the oldest sample. */
+/* Means and ddof-0 variances of a full window, oldest first as the Python's
+ * array is ordered; still_head points at the oldest sample. */
+static void still_stats(const pl_pipeline *p, pl_real mean_w[3],
+                        pl_real mean_a[3], pl_real var[3])
+{
+    const int window = p->still_window;
+    const pl_real count = (pl_real)window;
+    int i, k, slot;
+
     for (i = 0; i < 3; i++) {
         mean_w[i] = (pl_real)0.0;
         mean_a[i] = (pl_real)0.0;
@@ -150,10 +158,39 @@ static void step_idle(pl_pipeline *p, const pl_real omega[3],
         }
     }
     for (i = 0; i < 3; i++) {
-        /* std, ddof 0, as ndarray.std */
-        if (!(PL_SQRT(var[i] / count) < p->cfg.th.stillness_gyro_std_rad)) {
-            return;
+        var[i] = var[i] / count;
+    }
+}
+
+/* The address test: every axis's std (ddof 0, as ndarray.std) under the
+ * stillness threshold. */
+static int still_test(const pl_pipeline *p, const pl_real var[3])
+{
+    int i;
+    for (i = 0; i < 3; i++) {
+        if (!(PL_SQRT(var[i]) < p->cfg.th.stillness_gyro_std_rad)) {
+            return 0;
         }
+    }
+    return 1;
+}
+
+/* Wait for stillness, then capture the bias, g0 and the gyro's noise from the
+ * same window. */
+static void step_idle(pl_pipeline *p, const pl_real omega[3],
+                      const pl_real accel[3])
+{
+    const int window = p->still_window;
+    const pl_real count = (pl_real)window;
+    pl_real mean_w[3], mean_a[3], var[3], cov[9];
+    int i, j, k, slot;
+
+    if (!still_push(p, omega, accel)) {
+        return;
+    }
+    still_stats(p, mean_w, mean_a, var);
+    if (!still_test(p, var)) {
+        return;
     }
 
     for (i = 0; i < 9; i++) {
@@ -438,13 +475,6 @@ static void compute_path(pl_pipeline *p, pl_stroke_result *out)
     out->path_travel_m = (pl_real)0.0;
     out->path_direction = PL_DIRECTION_STRAIGHT;
 
-    if (p->pivot_calibration != NULL) {
-        pl_pivot_calibration_fold(p->pivot_calibration, &p->pivot);
-        p->has_pivot_solution = pl_pivot_calibration_solve(
-            p->pivot_calibration, &p->pivot_solution);
-    } else {
-        p->has_pivot_solution = pl_pivot_solve(&p->pivot, &p->pivot_solution);
-    }
     if (p->has_pivot_solution && p->pivot_solution.residual_fraction
                                      <= p->cfg.th.pivot_max_residual) {
         d = p->pivot_solution.offset;
@@ -556,7 +586,7 @@ static void compute_speed(const pl_pipeline *p, pl_stroke_result *out)
     out->speed_valid = 1;
 }
 
-static void compute(pl_pipeline *p, pl_stroke_result *out)
+static void compute(pl_pipeline *p, pl_stroke_result *out, int with_path)
 {
     const pl_real backswing = (p->i_transition - p->i_backswing_start) * p->dt;
     const pl_real downswing = ((pl_real)p->i_impact - p->i_transition) * p->dt;
@@ -571,7 +601,23 @@ static void compute(pl_pipeline *p, pl_stroke_result *out)
         ? pl_quat_twist_angle(p->q_impact, p->g0) * (pl_real)DEGREES_PER_RADIAN
         : (pl_real)0.0;
 
-    compute_path(p, out);
+    /* The pivot first: speed needs it whether or not there is a path. */
+    if (p->pivot_calibration != NULL) {
+        pl_pivot_calibration_fold(p->pivot_calibration, &p->pivot);
+        p->has_pivot_solution = pl_pivot_calibration_solve(
+            p->pivot_calibration, &p->pivot_solution);
+    } else {
+        p->has_pivot_solution = pl_pivot_solve(&p->pivot, &p->pivot_solution);
+    }
+
+    if (with_path) {
+        compute_path(p, out);
+    } else {
+        out->path_valid = 0;
+        out->path_arc_m = (pl_real)0.0;
+        out->path_travel_m = (pl_real)0.0;
+        out->path_direction = PL_DIRECTION_STRAIGHT;
+    }
     compute_speed(p, out);
 }
 
@@ -591,11 +637,54 @@ static int step_followthrough(pl_pipeline *p, const pl_real omega[3],
         p->hold += 1;
         if ((pl_real)p->hold * p->dt >= p->cfg.th.followthrough_hold_s) {
             enter(p, PL_STATE_DONE);
-            compute(p, out);
+            compute(p, out, 1);
             return 1;
         }
     } else {
         p->hold = 0;
+    }
+    return 0;
+}
+
+static void abandon(pl_pipeline *p, pl_abandon_reason reason)
+{
+    p->abandon_reason = reason;
+    p->abandoned_from = p->state;
+    enter(p, PL_STATE_ABANDONED);
+}
+
+/* The ways out of a stroke parent spec 7.1 does not have: back at rest
+ * before impact, and the timeout. The reasoning is in pipeline.py,
+ * _check_exits. Returns 0 to carry on, 1 with a result in `out`, 2 when the
+ * stroke was abandoned. */
+static int check_exits(pl_pipeline *p, const pl_real omega[3],
+                       const pl_real accel[3], pl_stroke_result *out)
+{
+    if (p->state == PL_STATE_ADDRESS || p->state == PL_STATE_BACKSWING
+        || p->state == PL_STATE_DOWNSWING) {
+        if (still_push(p, omega, accel)) {
+            pl_real mean_w[3], mean_a[3], var[3];
+            still_stats(p, mean_w, mean_a, var);
+            if (!still_test(p, var)) {
+                p->unsettled = 1;
+            } else if (p->unsettled) {
+                abandon(p, PL_ABANDON_REST);
+                return 2;
+            }
+        }
+    }
+
+    if ((p->state == PL_STATE_BACKSWING || p->state == PL_STATE_DOWNSWING
+         || p->state == PL_STATE_FOLLOWTHROUGH)
+        && ((pl_real)p->n - p->i_backswing_start) * p->dt
+           > p->cfg.th.stroke_timeout_s) {
+        if (p->state == PL_STATE_FOLLOWTHROUGH) {
+            enter(p, PL_STATE_DONE);
+            compute(p, out, 0);
+            return 1;
+        }
+        abandon(p, PL_ABANDON_TIMEOUT);
+        return 2;
     }
     return 0;
 }
@@ -617,11 +706,20 @@ int pl_pipeline_step(pl_pipeline *p, const int16_t gyro_counts[3],
         step_idle(p, omega, accel);
         return 0;
     }
-    if (p->state == PL_STATE_DONE) {
+    if (p->state == PL_STATE_DONE || p->state == PL_STATE_ABANDONED) {
         return 0;
     }
 
     integrate(p, omega, accel);
+
+    switch (check_exits(p, omega, accel, out)) {
+    case 1:
+        return 1;
+    case 2:
+        return 0;
+    default:
+        break;
+    }
 
     switch (p->state) {
     case PL_STATE_ADDRESS:

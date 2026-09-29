@@ -97,8 +97,9 @@ produces wrong numbers. Do not change any of them without explicit approval from
 ## State
 
 The board is in hand and working. **`HANDOFF.md` is current** — read it for what is built, what
-is proven, the open hardware defects, and what is blocked on Will. The spec carries eight
+is proven, the open hardware defects, and what is blocked on Will. The spec carries nine
 marked amendments (four to §6.4 against the datasheet and the hardware, one to §11 following
 from the §6.4 rate change, one to §7.4 recording the pivot-offset fit, one to §4.4 recording
-the charger, one to §6.2 recording data-ready acquisition pacing) plus one added section,
+the charger, one to §6.2 recording data-ready acquisition pacing, one to §7.1 adding the exits
+for strokes that never reach impact) plus one added section,
 §1.2.1; each amendment is recorded in it.
