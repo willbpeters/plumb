@@ -1,0 +1,12 @@
+# Plumb, 16 MB flash (parent spec 14.2).
+#
+# corpus: the stroke log, raw -- not LittleFS, which erases on its own
+# schedule and would stall acquisition mid-stroke (parent spec 11 as amended
+# 2026-09-29; docs/superpowers/specs/2026-09-29-stroke-logging-design.md).
+# Everything after the app, 14.5 MB.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x6000
+phy_init,   data, phy,     0xf000,   0x1000
+factory,    app,  factory, 0x10000,  0x200000
+corpus,     data, 0x40,    0x210000, 0xDF0000

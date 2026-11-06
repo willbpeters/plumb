@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "gate.h"
+#include "rec_port.h"
 #include "stroke.h"
 #include "uart_io.h"
 
@@ -214,6 +215,7 @@ void stream_service(void)
             s_have_prev = true;
             rate_feed(index, &r);
             stroke_feed(index, &r);
+            rec_port_feed(index, &r);
         }
         if (s_streaming) {
             emit(&r);

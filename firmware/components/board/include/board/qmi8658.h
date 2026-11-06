@@ -13,6 +13,11 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
+/* The full-scale ranges qmi8658_init() configures (CTRL2, CTRL3), for
+ * anything that has to record them -- the corpus log's session header. */
+#define QMI8658_GYRO_DPS 256u
+#define QMI8658_ACCEL_G 16u
+
 #define QMI8658_STATUSINT_AVAIL 0x01u
 #define QMI8658_STATUSINT_LOCKED 0x02u
 

@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gate.h"
+#include "rec_port.h"
 #include "stream.h"
 #include "stroke.h"
 #include "uart_io.h"
@@ -39,6 +40,7 @@ static void status(void)
 {
     stream_status();
     stroke_status();
+    rec_port_status();
     uart_io_printf("# imu %s (init step %d, ctrl9 %ld us, SDA at boot %d, clear clocks %d, SDA after clear %d), ui %s\n",
                    esp_err_to_name(s_imu_result), qmi8658_init_step(),
                    (long)qmi8658_ctrl9_us(), board_i2c_sda_at_boot(),
@@ -52,6 +54,9 @@ static void status(void)
 static void console(char c)
 {
     const bool ui = (s_ui_result == ESP_OK);
+    if (rec_port_console(c)) {
+        return;
+    }
     switch (c) {
     case 's': stream_toggle(); break;
     case 'b': stream_set_binary(true); uart_io_printf("# format binary\n"); break;
@@ -91,15 +96,17 @@ static void app_task(void *arg)
     if (s_ui_result != ESP_OK) {
         uart_io_printf("# UI init failed: %s\n", esp_err_to_name(s_ui_result));
     }
+    rec_port_init();
     stream_init();
     status();
-    uart_io_printf("# ready: s b c a o x j m r n p ?\n");
+    uart_io_printf("# ready: s b c a o x j m r n p l e B ?\n");
     for (;;) {
         int c;
         while ((c = uart_io_getc()) >= 0) {
             console((char)c);
         }
         stream_service();
+        rec_port_service();
         if (s_ui_result == ESP_OK) {
             ui_port_service();
         }

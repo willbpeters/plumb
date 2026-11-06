@@ -40,6 +40,9 @@ ACQ = REPO / "firmware" / "components" / "acq"
 ACQ_SOURCES = [HARNESS / "acqcheck.c",
                *(ACQ / "src" / f"{name}.c"
                  for name in ("ring", "seqcount", "jitter", "frame", "rate"))]
+REC = REPO / "firmware" / "components" / "rec"
+REC_SOURCES = [HARNESS / "reccheck.c",
+               *(REC / "src" / f"{name}.c" for name in ("crc32", "block", "log"))]
 LVGL = REPO / "firmware" / "third_party" / "lvgl"
 UI = REPO / "firmware" / "components" / "plumb_ui"
 
@@ -184,10 +187,10 @@ def build(name: str, *defines: str, sources: list[Path] | None = None,
         # identical is deliberate: a warning that only one toolchain emits is a
         # warning nobody sees.
         command = [str(zig), "cc", "-std=c99", "-O2", "-Wall", "-Wextra",
-                   "-Werror",
-                   f"-I{COMPONENT / 'include'}",
+                   "-Werror", "-ffp-contract=off",
+                   *(f"-I{p}" for p in includes),
                    *(f"-D{d}" for d in defines),
-                   *(str(s) for s in SOURCES), "-lm", "-o", str(output)]
+                   *(str(s) for s in sources), "-lm", "-o", str(output)]
         environment = None
         label = "zig"
 
@@ -205,14 +208,19 @@ def build_acqcheck(name: str = "acqcheck.exe") -> BuildResult:
     """The acquisition core's pure-C modules, for tests/test_acq.py."""
     return build(name, sources=ACQ_SOURCES, includes=[ACQ / "include"])
 
-def _unix_objects(cc: str, flags: list[str], sources: list[Path],
+def build_reccheck(name: str = "reccheck.exe") -> BuildResult:
+    """The corpus log's pure-C modules, for tests/test_rec.py."""
+    return build(name, sources=REC_SOURCES, includes=[REC / "include"])
+
+
+def _unix_objects(cc: list[str], flags: list[str], sources: list[Path],
                   directory: Path) -> list[Path]:
     """Compile each source to an object, in parallel. cc has no -MP."""
     from concurrent.futures import ThreadPoolExecutor
 
     def one(source: Path):
         obj = directory / f"{source.stem}.o"
-        result = subprocess.run([cc, *flags, "-c", str(source), "-o", str(obj)],
+        result = subprocess.run([*cc, *flags, "-c", str(source), "-o", str(obj)],
                                 capture_output=True, text=True)
         return source, result
 
@@ -276,28 +284,37 @@ def build_ui(name: str = "uisnap.exe") -> BuildResult:
     fresh = stamp_file.is_file() and stamp_file.read_text() == stamp
     common = ["-DLV_CONF_INCLUDE_SIMPLE"]
 
+    # The same order as build(): a system cc, then MSVC, then zig cc.
     unix = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-    if unix:
+    cc, label = ([unix], f"unix:{Path(unix).name}") if unix else (None, "")
+    if cc is None and _msvc() is None and _zig() is not None:
+        cc, label = [str(_zig()), "cc"], "zig"
+    if cc:
         lib_flags = ["-std=c99", "-O2", "-w", *common, f"-I{UI}", f"-I{LVGL}"]
         if not fresh:
             for group, directory in zip(groups, group_dirs):
-                _unix_objects(unix, lib_flags, group, directory)
+                _unix_objects(cc, lib_flags, group, directory)
             stamp_file.write_text(stamp)
         lib = [d / f"{s.stem}.o" for g, d in zip(groups, group_dirs) for s in g]
-        font_objs = _unix_objects(unix, lib_flags, fonts, our_dir)
-        command = [unix, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+        font_objs = _unix_objects(cc, lib_flags, fonts, our_dir)
+        # The ~480 objects go in a response file: on Windows (zig cc) they
+        # overflow the 32K command line, as they would for cl. Forward slashes
+        # and quotes, which clang's and GCC's response-file parsers both read.
+        link = our_dir / "link.rsp"
+        link.write_text("\n".join(f'"{p.as_posix()}"'
+                                  for p in [*ours, *font_objs, *lib]))
+        command = [*cc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
                    *common, f"-I{UI / 'include'}", f"-I{UI / 'src'}",
                    f"-I{UI}", "-isystem", str(LVGL),
-                   *(str(s) for s in ours), *(str(o) for o in font_objs + lib),
-                   "-lm", "-o", str(output)]
+                   f"@{link}", "-lm", "-o", str(output)]
         environment = None
-        label = f"unix:{Path(unix).name}"
     else:
         msvc = _msvc()
         if msvc is None:
             raise CompilerNotFound(
                 "no host C compiler found (looked for cc, gcc, clang, then "
-                "MSVC under Program Files)")
+                "MSVC under Program Files, then `zig cc` from the ziglang "
+                "wheel -- `uv sync` in analysis/ installs that one)")
         cl, include, lib_paths = msvc
         environment = dict(os.environ)
         environment["INCLUDE"] = os.pathsep.join(str(p) for p in include)

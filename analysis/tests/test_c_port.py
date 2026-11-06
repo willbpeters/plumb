@@ -302,8 +302,15 @@ def test_single_precision_across_a_whole_stroke(monkeypatch, portcheck,
                     monkeypatch, StrokeParams(arc_type=arc,
                                               face_angle_at_impact_deg=face),
                     sensor, seed=1)
+                # Exact under MSVC. Under zig cc one case of twelve lands one
+                # ulp off (2.000050194855104 against ...103, measured
+                # 2026-09-29), consistent with a different libm, since FMA
+                # contraction is off on both. 1e-12 deg still proves the replay
+                # integrates what the pipeline did -- a wrong replay is off by
+                # far more -- and sits seven orders under the 4e-5 being measured.
                 assert replay_face_angle_deg(portcheck, calls, g0) \
-                    == result.face_angle_deg, "the double replay is not faithful"
+                    == pytest.approx(result.face_angle_deg, abs=1e-12), \
+                    "the double replay is not faithful"
                 single = replay_face_angle_deg(portcheck_single, calls, g0)
                 worst = max(worst, abs(single - result.face_angle_deg))
 

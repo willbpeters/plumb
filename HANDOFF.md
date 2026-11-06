@@ -241,6 +241,43 @@ C. Open defect 7 is what that left open. Kept from the parallel line:
 - `sweep.noise_breakdown_dps` now reports the last level before the first failure, not the
   highest passing level.
 
+Also found on this machine, which builds C with `zig cc` (no MSVC): `build()`'s zig branch had
+merged in stale, ignoring the sources and includes it was given and building without
+`-ffp-contract=off`; `build_ui()` had no zig branch at all, so **all 54 UI tests had been
+skipping here**, and its link overflowed Windows' command line once it did. All fixed. One C
+port test compared double replays with `==` and is one ulp off under zig (a different libm);
+now 1e-12°, with the reason in the test.
+
+### Stroke logging (2026-09-29)
+
+Parent spec §11 amended (Will's decisions): **record sessions, not strokes**, so the corpus
+carries no trigger bias (invariant 5), on **a raw partition, not LittleFS**, because a flash
+erase stalls both cores and would drop samples mid-stroke.
+`docs/superpowers/specs/2026-09-29-stroke-logging-design.md` has the format.
+
+- **`components/rec`**, pure C: a lossless block encoder (per-axis differences, Rice-coded,
+  64-sample blocks with CRCs) and an append-only log that only ever programs one 256-byte page
+  per app-loop pass while recording. **`plumb/corpus.py`**, written from the design doc, decodes
+  it. `tests/test_rec.py`, 28 tests: the simulator's int16 samples come back bit
+  for bit through the C and the Python, with index gaps (lost samples recorded exactly),
+  full-scale jumps, a partition that fills, and power lost mid-page (keeps all but ~0.1 s).
+- **Compression, measured on the simulator: 2.32× on a noisy stroke**, 6.1× noiseless. The
+  gyro's sensor noise is most of what is left. 14.5 MB partition: ~22 min raw, ~50 min at that
+  ratio. Real room vibration will move it.
+- **`main/rec_port.c`**: console `l` start/stop, `e` then `Y` erase, `B` record-from-boot (NVS),
+  status in `?`. `firmware/partitions.csv`: 2 MB app, `corpus` the rest.
+  **`tools/rec_dump.py`**: `esptool read_flash` in 1 MB pieces, stops at erased flash;
+  `--summary IMAGE` decodes one.
+- **NOT BUILT: `rec_port.c` and the partition table have never been compiled.** ESP-IDF is not
+  installed on the machine this was written on. The pure-C parts are proven on the host.
+
+**Measure on the board, in order:** build and flash (the new partition table erases nothing
+the app uses, but `idf.py flash` must write it); `l`, hold still a minute, `l`, and read `lost`
+in the stop line. That is the question the design could not answer: whether a 256-byte page
+program fits inside a ~1.1 ms sample period. If `lost` is non-zero, the fix is the IRAM work
+next task 0 already lists (acquisition task, `qmi8658.c`, the GPIO ISR). Then the real
+compression ratio, and how long `e Y` takes.
+
 ---
 
 ## ▸ Next task — pick one
@@ -538,6 +575,10 @@ unvalidated numbers fails the goal. Raise it once if it becomes relevant; do not
 ---
 
 ## Blocked on Will
+
+- **Build and flash the logging firmware, then one minute of `l`.** See "Stroke logging
+  (2026-09-29)" above: it has not been compiled. The dump also needs esptool, which ESP-IDF's
+  environment has; add it to `analysis/` (`uv add esptool`) if the dump should run from there.
 
 - **Run the accelerometer tumble.** `cd analysis; uv run python -m tools.accel_cal --port COM4
   --gravity 9.800` — six faces, then two poses of any kind, board still each time. It prints

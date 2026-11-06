@@ -883,6 +883,28 @@ metrics, so the corpus remains usable when the algorithm changes.
 
 The corpus is dumped over USB and is the input to the Python development workflow in §7.6.
 
+*Amended 2026-09-29 (Will's decisions).* Two changes, and the format they lead to is in
+`2026-09-29-stroke-logging-design.md`.
+
+- **Record sessions, not strokes.** The golfer starts and stops recording, and everything in
+  between is kept. A per-stroke record needs something on the device to decide what a stroke
+  is, and in Phase 2 that would be the placeholder thresholds that §7.1 and invariant 5 say
+  must come *from* this corpus. Selecting the corpus with them would bias it towards what they
+  already accept. Strokes are cut out offline. Per-stroke records remain the right thing for
+  the finished product.
+- **A raw partition, not LittleFS.** On the ESP32-S3 a flash write or erase disables the
+  cache on both cores, and the IMU is read directly with no FIFO, so a stall longer than one
+  sample period (~1.1 ms) loses samples. LittleFS erases on its own schedule during writes. An
+  append-only log erases only when told to (after a dump, at rest), and while recording only
+  programs one 256-byte page at a time. Wear levelling buys nothing at tens of cycles.
+
+Samples are stored **losslessly compressed** (per-axis differences, Rice-coded in 64-sample
+blocks). Every metric reads both sensors, so no channel can be dropped. Measured on the
+simulator at the board's noise floor, 2.3× on a noisy stroke. The partition is the 14.5 MB
+after a 2 MB app: about 22 minutes raw, roughly 50 at that ratio, before the board says what
+real room vibration does to it. A gap in the sensor's own sample index is recorded exactly,
+whatever caused it. That supersedes the per-stroke estimate above.
+
 ---
 
 ## 12. Risks
